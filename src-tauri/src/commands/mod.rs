@@ -193,32 +193,50 @@ pub async fn stt_recognize(audio_base64: String) -> Result<String, String> {
     let tmp2 = tmp.clone();
 
     let text = tokio::task::spawn_blocking(move || {
-        // Save raw audio (mp4 or webm from MediaRecorder, ffmpeg handles both)
+        // Save raw audio and convert to WAV
         let raw_path = format!("{}.audio", tmp2);
-        std::fs::write(&raw_path, &audio_bytes)
-            .map_err(|e| format!("Failed to write audio: {}", e))?;
-
-        // Convert to WAV using ffmpeg (speech_recognition needs WAV)
         let wav_path = format!("{}.wav", tmp2);
+        std::fs::write(&raw_path, &audio_bytes)
+            .map_err(|e| format!("Write failed: {}", e))?;
+
         let ffmpeg = std::process::Command::new("ffmpeg")
             .args(["-y", "-i", &raw_path, "-ar", "16000", "-ac", "1", &wav_path])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map_err(|e| format!("ffmpeg not found: {}", e))?;
-
+            .map_err(|e| format!("ffmpeg: {}", e))?;
         let _ = std::fs::remove_file(&raw_path);
-
         if !ffmpeg.success() {
-            return Err("ffmpeg 转换音频失败".to_string());
+            return Err("ffmpeg conversion failed".to_string());
         }
 
-        // Call Python speech_recognition with Google STT
+        // Try MLX Whisper first (local, offline)
+        let mlx_result = std::process::Command::new("python3")
+            .args(["-c", &format!(
+                "import mlx_whisper; r = mlx_whisper.transcribe('{}', language='zh', path_or_hf_repo='mlx-community/whisper-large-v3-turbo'); print('OK:' + r.get('text','').strip())",
+                wav_path
+            )])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        if let Ok(output) = mlx_result {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if output.status.success() && stdout.starts_with("OK:") {
+                let text = stdout[3..].to_string();
+                let _ = std::fs::remove_file(&wav_path);
+                if !text.is_empty() {
+                    tracing::info!("MLX STT: {}", text);
+                    return Ok(text);
+                }
+            }
+            tracing::warn!("MLX STT failed, trying Google STT");
+        }
+
+        // Fallback: Google STT via speech_recognition
         let output = std::process::Command::new("python3")
-            .args([
-                "-c",
-                &format!(
-                    r#"
+            .args(["-c", &format!(
+                r#"
 import speech_recognition as sr
 r = sr.Recognizer()
 with sr.AudioFile("{}") as source:
@@ -229,19 +247,12 @@ except sr.UnknownValueError:
     print("")
 except sr.RequestError as e:
     print("ERROR:" + str(e))
-"#,
-                    wav_path
-                ),
-            ])
+"#, wav_path
+            )])
             .output()
-            .map_err(|e| format!("Python STT failed: {}", e))?;
+            .map_err(|e| format!("Google STT failed: {}", e))?;
 
         let _ = std::fs::remove_file(&wav_path);
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("STT 进程错误: {}", stderr.chars().take(200).collect::<String>()));
-        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if stdout.starts_with("ERROR:") {
@@ -251,11 +262,11 @@ except sr.RequestError as e:
             return Err("未识别到语音".to_string());
         }
 
-        tracing::info!("STT result: {}", stdout);
+        tracing::info!("Google STT: {}", stdout);
         Ok(stdout)
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))??;
+    .map_err(|e| format!("Task error: {}", e))??;
 
     Ok(text)
 }
