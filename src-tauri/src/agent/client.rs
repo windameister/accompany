@@ -81,13 +81,15 @@ impl AgentClient {
             tier
         );
 
-        // Build messages snapshot, then immediately release the lock
+        // Build messages snapshot without modifying history yet.
+        // History is only updated on success (avoids race condition on failure rollback).
+        let user_msg = ChatMessage {
+            role: "user".into(),
+            content: user_message.to_string(),
+        };
+
         let messages = {
-            let mut history = self.history.lock().await;
-            history.push(ChatMessage {
-                role: "user".into(),
-                content: user_message.to_string(),
-            });
+            let history = self.history.lock().await;
 
             let base_prompt = system_prompt();
             let memory_ctx = self.memory_context.lock().unwrap().take();
@@ -103,6 +105,7 @@ impl AgentClient {
             }];
             let start = history.len().saturating_sub(20);
             msgs.extend_from_slice(&history[start..]);
+            msgs.push(user_msg.clone()); // Include user msg in request but not in history yet
             msgs
         }; // history lock released here
 
@@ -125,8 +128,6 @@ impl AgentClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            // Remove user message from history on failure
-            self.history.lock().await.pop();
             return Err(format!("API error ({}): {}", status, body));
         }
 
@@ -178,11 +179,15 @@ impl AgentClient {
             on_token(&remaining);
         }
 
-        // Store full raw content in history (re-acquire lock briefly)
-        self.history.lock().await.push(ChatMessage {
-            role: "assistant".into(),
-            content: raw_content,
-        });
+        // Success: commit both user message and assistant response to history
+        {
+            let mut history = self.history.lock().await;
+            history.push(user_msg);
+            history.push(ChatMessage {
+                role: "assistant".into(),
+                content: raw_content,
+            });
+        }
 
         // Return only visible content (for display + TTS)
         Ok((visible_content, tier))
@@ -232,11 +237,22 @@ impl ThinkFilter {
                     self.in_think = false;
                     pos += end + 8; // skip past </think>
                 } else {
-                    // Check for partial </think at end
+                    // No complete </think> found. Check if tail ends with
+                    // a partial prefix of "</think>" (e.g. "abc</thi")
                     let tail = &input[pos..];
-                    if "</think>".starts_with(tail) && tail.starts_with('<') {
-                        self.pending = tail.to_string();
+                    let closing = "</think>";
+                    let mut partial_len = 0;
+                    for i in 1..=tail.len().min(closing.len()) {
+                        let suffix = &tail[tail.len() - i..];
+                        if closing.starts_with(suffix) {
+                            partial_len = i;
+                            break;
+                        }
                     }
+                    if partial_len > 0 {
+                        self.pending = tail[tail.len() - partial_len..].to_string();
+                    }
+                    // Everything in tail (minus buffered partial) is think content → discard
                     break;
                 }
             } else {

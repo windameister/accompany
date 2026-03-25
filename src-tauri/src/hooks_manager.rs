@@ -3,28 +3,25 @@ use std::path::PathBuf;
 
 const HOOK_PORT: u16 = 17832;
 
-/// Marker to identify Accompany-owned hooks.
-const ACCOMPANY_MARKER: &str = "127.0.0.1:17832";
+/// Unique marker to identify Accompany-owned hook entries.
+/// Embedded as "_source" field in each hook entry.
+const ACCOMPANY_MARKER: &str = "accompany-desktop-companion";
 
 /// The hook entries Accompany needs, keyed by event name.
+fn accompany_hook_entry(matcher: &str, path: &str) -> Value {
+    json!({
+        "_source": ACCOMPANY_MARKER,
+        "matcher": matcher,
+        "hooks": [{"type": "http", "url": format!("http://127.0.0.1:{}{}", HOOK_PORT, path), "timeout": 5}]
+    })
+}
+
 fn accompany_hooks() -> Vec<(&'static str, Value)> {
     vec![
-        ("SessionStart", json!({
-            "matcher": "",
-            "hooks": [{"type": "http", "url": format!("http://{}:{}/hooks/session-start", "127.0.0.1", HOOK_PORT), "timeout": 5}]
-        })),
-        ("PermissionRequest", json!({
-            "matcher": "",
-            "hooks": [{"type": "http", "url": format!("http://{}:{}/hooks/permission-request", "127.0.0.1", HOOK_PORT), "timeout": 5}]
-        })),
-        ("Notification", json!({
-            "matcher": "permission_prompt",
-            "hooks": [{"type": "http", "url": format!("http://{}:{}/hooks/notification", "127.0.0.1", HOOK_PORT), "timeout": 5}]
-        })),
-        ("Stop", json!({
-            "matcher": "",
-            "hooks": [{"type": "http", "url": format!("http://{}:{}/hooks/stop", "127.0.0.1", HOOK_PORT), "timeout": 5}]
-        })),
+        ("SessionStart", accompany_hook_entry("", "/hooks/session-start")),
+        ("PermissionRequest", accompany_hook_entry("", "/hooks/permission-request")),
+        ("Notification", accompany_hook_entry("permission_prompt", "/hooks/notification")),
+        ("Stop", accompany_hook_entry("", "/hooks/stop")),
     ]
 }
 
@@ -35,10 +32,11 @@ fn global_settings_path() -> PathBuf {
         .join("settings.json")
 }
 
-/// Check if Accompany hooks are installed (by checking for our marker URL).
+/// Check if Accompany hooks are installed (by checking for our _source marker).
 pub fn is_installed_global() -> bool {
     let path = global_settings_path();
     if let Ok(content) = std::fs::read_to_string(&path) {
+        // Check for our specific marker field value
         return content.contains(ACCOMPANY_MARKER);
     }
     false
@@ -78,8 +76,7 @@ pub fn install_global() -> Result<(), String> {
         if let Some(arr) = arr.as_array_mut() {
             // Remove any existing Accompany entries (by URL marker) to avoid duplicates
             arr.retain(|item| {
-                let s = serde_json::to_string(item).unwrap_or_default();
-                !s.contains(ACCOMPANY_MARKER)
+                item.get("_source").and_then(|s| s.as_str()) != Some(ACCOMPANY_MARKER)
             });
             arr.push(entry);
         }
