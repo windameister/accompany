@@ -69,6 +69,14 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, [showSpeechBubble, clearSpeechBubble, setMood]);
 
+  // Listen for GitHub notifications (success = bubble only, failure = TTS from backend)
+  useEffect(() => {
+    const unlisten = listen<string>("github-notify", (event) => {
+      showSpeechBubble(event.payload, 6000);
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [showSpeechBubble]);
+
   // Listen for streaming tokens → update speech bubble
   useEffect(() => {
     let accumulated = "";

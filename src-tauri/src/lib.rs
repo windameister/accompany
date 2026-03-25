@@ -9,6 +9,7 @@ mod claude_monitor;
 mod commands;
 mod hooks_manager;
 mod memory;
+mod notifications;
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::PredefinedMenuItem;
@@ -168,7 +169,16 @@ pub fn run() {
                 tts_for_hooks,
             ));
 
-            tracing::info!("Accompany started successfully! Hook server on :17832, Cmd+Shift+A to toggle.");
+            // Start GitHub Actions monitor
+            let app_for_gh = app.handle().clone();
+            let tts_for_gh = agent::tts::TtsClient::new(
+                std::env::var("MINIMAX_API_KEY").unwrap_or_default(),
+            );
+            tauri::async_runtime::spawn(
+                notifications::github::start_github_monitor(app_for_gh, tts_for_gh),
+            );
+
+            tracing::info!("Accompany started successfully! Hook server on :17832, GitHub monitor active, Cmd+Shift+A to toggle.");
             Ok(())
         })
         .run(tauri::generate_context!())
