@@ -232,50 +232,28 @@ impl ThinkFilter {
 
         while pos < input.len() {
             if self.in_think {
-                // Look for </think>
                 if let Some(end) = input[pos..].find("</think>") {
                     self.in_think = false;
-                    pos += end + 8; // skip past </think>
+                    pos += end + 8;
                 } else {
-                    // No complete </think> found. Check if tail ends with
-                    // a partial prefix of "</think>" (e.g. "abc</thi")
+                    // Check for partial </think> at end (only ASCII chars, safe to slice)
                     let tail = &input[pos..];
-                    let closing = "</think>";
-                    let mut partial_len = 0;
-                    for i in 1..=tail.len().min(closing.len()) {
-                        let suffix = &tail[tail.len() - i..];
-                        if closing.starts_with(suffix) {
-                            partial_len = i;
-                            break;
-                        }
+                    if let Some(partial) = find_tag_suffix(tail, "</think>") {
+                        self.pending = partial.to_string();
                     }
-                    if partial_len > 0 {
-                        self.pending = tail[tail.len() - partial_len..].to_string();
-                    }
-                    // Everything in tail (minus buffered partial) is think content → discard
                     break;
                 }
             } else {
-                // Look for <think>
                 if let Some(start) = input[pos..].find("<think>") {
                     result.push_str(&input[pos..pos + start]);
                     self.in_think = true;
-                    pos += start + 7; // skip past <think>
+                    pos += start + 7;
                 } else {
-                    // Check for partial <think at end
                     let tail = &input[pos..];
-                    // Find if any suffix of tail is a prefix of "<think>"
-                    let mut partial_len = 0;
-                    for i in 1..=tail.len().min(7) {
-                        let suffix = &tail[tail.len() - i..];
-                        if "<think>".starts_with(suffix) {
-                            partial_len = i;
-                            break;
-                        }
-                    }
-                    if partial_len > 0 {
-                        result.push_str(&tail[..tail.len() - partial_len]);
-                        self.pending = tail[tail.len() - partial_len..].to_string();
+                    if let Some(partial) = find_tag_suffix(tail, "<think>") {
+                        let safe_end = tail.len() - partial.len();
+                        result.push_str(&tail[..safe_end]);
+                        self.pending = partial.to_string();
                     } else {
                         result.push_str(tail);
                     }
@@ -290,9 +268,26 @@ impl ThinkFilter {
     /// Flush any remaining pending content (call at end of stream).
     fn flush(&mut self) -> String {
         if self.in_think {
-            String::new() // discard pending think content
+            String::new()
         } else {
             std::mem::take(&mut self.pending)
         }
     }
+}
+
+/// Find if any suffix of `text` is a prefix of `tag`.
+/// Returns the matching suffix, or None. Only searches from `<` positions
+/// to avoid splitting multi-byte UTF-8 characters.
+fn find_tag_suffix<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    // Tags like <think> and </think> start with '<', which is ASCII.
+    // So we only need to check suffixes starting with '<'.
+    for (i, ch) in text.char_indices().rev() {
+        if ch == '<' {
+            let suffix = &text[i..];
+            if tag.starts_with(suffix) {
+                return Some(suffix);
+            }
+        }
+    }
+    None
 }

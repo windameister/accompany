@@ -16,10 +16,19 @@ fn token_path() -> std::path::PathBuf {
         .join("hook_token")
 }
 
-/// Generate and persist a random token for hook auth.
-pub fn generate_hook_token() -> String {
-    let token = ulid::Ulid::new().to_string();
+/// Get or create the hook auth token. Reuses existing token to avoid
+/// invalidating already-installed hooks on restart.
+pub fn get_or_create_token() -> String {
     let path = token_path();
+    // Try to read existing token
+    if let Ok(token) = std::fs::read_to_string(&path) {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return token;
+        }
+    }
+    // Generate new token only if none exists
+    let token = ulid::Ulid::new().to_string();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -42,8 +51,8 @@ struct HookState {
 }
 
 pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, tts: TtsClient) {
-    let token = generate_hook_token();
-    tracing::info!("Hook auth token generated");
+    let token = get_or_create_token();
+    tracing::info!("Hook auth token ready");
 
     let state = HookState {
         tracker,
@@ -61,7 +70,9 @@ pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, tts: Tts
                 .get("X-Accompany-Token")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            if provided != expected {
+            // Accept if: token matches, OR no token provided (legacy hooks without auth)
+            // This allows old hooks to keep working until they're reinstalled with token
+            if !provided.is_empty() && provided != expected {
                 tracing::warn!("Hook request rejected: invalid token");
                 return Ok(StatusCode::UNAUTHORIZED.into_response());
             }

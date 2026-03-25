@@ -151,6 +151,7 @@ pub fn run() {
             commands::chat_send,
             commands::chat_clear,
             commands::tts_speak,
+            commands::stt_recognize,
             commands::memory_list,
             commands::memory_delete,
         ])

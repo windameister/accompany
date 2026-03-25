@@ -5,6 +5,7 @@ import CharacterCanvas from "@/components/character/CharacterCanvas";
 import SpeechBubble from "@/components/character/SpeechBubble";
 import { useCharacterStore } from "@/stores/characterStore";
 import { useAudioQueue } from "@/hooks/useAudioPlayer";
+import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import { chatSend, onCharacterMood, onChatToken } from "@/lib/tauri";
 import type { CharacterMood } from "@/lib/constants";
 
@@ -13,17 +14,49 @@ function App() {
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const { setMood, showSpeechBubble, clearSpeechBubble } = useCharacterStore();
-
-  // Audio queue — plays TTS chunks as they arrive
   const { stop: stopAudio } = useAudioQueue((playing) => {
     if (!playing) {
-      // Audio finished playing
       setTimeout(() => {
         setMood("idle");
         clearSpeechBubble();
       }, 1500);
     }
   });
+
+  // Send a message (from text input or voice)
+  const sendMessage = useCallback(async (msg: string) => {
+    const trimmed = msg.trim();
+    if (!trimmed || isLoading) return;
+
+    setInputText("");
+    setInputVisible(false);
+    setIsLoading(true);
+    stopAudio();
+    showSpeechBubble("思考中...", 0);
+
+    try {
+      const res = await chatSend(trimmed);
+      showSpeechBubble(
+        res.content.length > 80 ? res.content.slice(0, 77) + "..." : res.content,
+        8000,
+      );
+    } catch (e) {
+      showSpeechBubble(`出错了: ${String(e).slice(0, 50)}`, 4000);
+      setMood("idle");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isLoading, setMood, showSpeechBubble, stopAudio]);
+
+  // Speech recognition — sends recognized text directly via sendMessage
+  const {
+    isListening,
+    isProcessing: sttProcessing,
+    isSupported: sttSupported,
+    startListening,
+    stopListening,
+    error: sttError,
+  } = useSpeechRecognition({ onResult: sendMessage });
 
   // Listen for mood changes from backend
   useEffect(() => {
@@ -41,29 +74,20 @@ function App() {
       waiting_count: number;
     }>("claude-needs-approval", async (event) => {
       const { message } = event.payload;
-
-      // Show alert bubble
       showSpeechBubble(message, 0);
       setMood("alert");
-
-      // Make window visible
       const win = getCurrentWindow();
       await win.show();
       await win.setFocus();
-
-      // TTS is handled by backend via tts-audio event — no need to call ttsSpeak here
-
-      // Auto-dismiss after 15s if not interacted
       setTimeout(() => {
         clearSpeechBubble();
         setMood("idle");
       }, 15000);
     });
-
     return () => { unlisten.then((fn) => fn()); };
   }, [showSpeechBubble, clearSpeechBubble, setMood]);
 
-  // Listen for GitHub notifications (success = bubble only, failure = TTS from backend)
+  // Listen for GitHub notifications
   useEffect(() => {
     const unlisten = listen<string>("github-notify", (event) => {
       showSpeechBubble(event.payload, 6000);
@@ -71,40 +95,31 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, [showSpeechBubble]);
 
-  // Listen for streaming tokens → update speech bubble
+  // Listen for streaming tokens
   useEffect(() => {
     let accumulated = "";
     const unlisten = onChatToken((token) => {
       accumulated += token;
-      // Show last ~80 chars
       const display = accumulated.length > 80
         ? "..." + accumulated.slice(-77)
         : accumulated;
       showSpeechBubble(display, 0);
     });
-
-    // Reset accumulator when tts-done fires (response complete)
-    const unlistenDone = listen("tts-done", () => {
-      accumulated = "";
-    });
-
+    const unlistenDone = listen("tts-done", () => { accumulated = ""; });
     return () => {
       unlisten.then((fn) => fn());
       unlistenDone.then((fn) => fn());
     };
   }, [showSpeechBubble]);
 
-  // Click-through: ignore cursor on transparent areas, capture on character/UI
+  // Click-through
   useEffect(() => {
     const win = getCurrentWindow();
     let ignoring = false;
 
-    // Character occupies roughly center of 320x400 window
-    // Live2D model is anchored at center, scaled to ~85% of window
-    // Approximate elliptical hit zone
     const isOverCharacter = (x: number, y: number) => {
-      const cx = 160, cy = 200; // center of window
-      const rx = 80, ry = 160;  // ellipse radii (character is taller than wide)
+      const cx = 160, cy = 200;
+      const rx = 80, ry = 160;
       const dx = (x - cx) / rx;
       const dy = (y - cy) / ry;
       return dx * dx + dy * dy <= 1.0;
@@ -113,34 +128,20 @@ function App() {
     const handleMouseMove = async (e: MouseEvent) => {
       const isOverUI = (e.target as HTMLElement).closest("[data-no-drag]");
       const overChar = isOverCharacter(e.clientX, e.clientY);
-
       if (isOverUI || overChar) {
-        if (ignoring) {
-          await win.setIgnoreCursorEvents(false);
-          ignoring = false;
-        }
+        if (ignoring) { await win.setIgnoreCursorEvents(false); ignoring = false; }
       } else {
-        if (!ignoring) {
-          await win.setIgnoreCursorEvents(true);
-          ignoring = true;
-        }
+        if (!ignoring) { await win.setIgnoreCursorEvents(true); ignoring = true; }
       }
     };
 
     const handleMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.closest("[data-no-drag]")) return;
-      if (e.button === 0 && !ignoring) {
-        win.startDragging();
-      }
+      if ((e.target as HTMLElement).closest("[data-no-drag]")) return;
+      if (e.button === 0 && !ignoring) win.startDragging();
     };
 
-    // Also handle mouse leaving the window entirely
     const handleMouseLeave = async () => {
-      if (ignoring) {
-        await win.setIgnoreCursorEvents(false);
-        ignoring = false;
-      }
+      if (ignoring) { await win.setIgnoreCursorEvents(false); ignoring = false; }
     };
 
     window.addEventListener("mousemove", handleMouseMove);
@@ -159,46 +160,30 @@ function App() {
     setInputVisible((v) => !v);
   }, [isLoading]);
 
-  const handleSend = useCallback(async () => {
-    const msg = inputText.trim();
-    if (!msg || isLoading) return;
-
-    setInputText("");
-    setInputVisible(false);
-    setIsLoading(true);
-    stopAudio(); // Stop any previous audio
-    showSpeechBubble("思考中...", 0);
-
-    try {
-      const res = await chatSend(msg);
-      // Response text is shown via streaming tokens + speech bubble
-      // Audio is played via tts-audio events + audio queue
-      showSpeechBubble(
-        res.content.length > 80
-          ? res.content.slice(0, 77) + "..."
-          : res.content,
-        8000,
-      );
-    } catch (e) {
-      showSpeechBubble(`出错了: ${String(e).slice(0, 50)}`, 4000);
-      setMood("idle");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [inputText, isLoading, setMood, showSpeechBubble, stopAudio]);
+  const handleSend = useCallback(() => {
+    sendMessage(inputText);
+  }, [inputText, sendMessage]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        handleSend();
-      }
-      if (e.key === "Escape") {
-        setInputVisible(false);
-      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+      if (e.key === "Escape") setInputVisible(false);
     },
     [handleSend],
   );
+
+  // Voice button handlers
+  const handleMicDown = useCallback(() => {
+    if (isLoading || isListening || sttProcessing) return;
+    showSpeechBubble("🎤 在听...", 0);
+    startListening();
+  }, [isLoading, isListening, sttProcessing, startListening, showSpeechBubble]);
+
+  const handleMicUp = useCallback(() => {
+    if (isListening) {
+      stopListening();
+    }
+  }, [isListening, stopListening]);
 
   return (
     <div className="relative w-full h-full select-none">
@@ -211,18 +196,44 @@ function App() {
         <CharacterCanvas />
       </div>
 
+      {/* Input bar: text + mic button */}
       {inputVisible && (
         <div
           data-no-drag
           className="absolute bottom-3 left-3 right-3 animate-fade-in"
         >
           <div className="flex gap-1.5 bg-white/95 backdrop-blur-md rounded-2xl shadow-lg border border-pink-100 p-1.5">
+            {/* Mic button */}
+            {sttSupported && (
+              <button
+                onMouseDown={handleMicDown}
+                onMouseUp={handleMicUp}
+                onMouseLeave={handleMicUp}
+                onTouchStart={handleMicDown}
+                onTouchEnd={handleMicUp}
+                disabled={isLoading || sttProcessing}
+                className={`
+                  px-2.5 py-1.5 rounded-xl text-sm transition-all
+                  ${isListening
+                    ? "bg-red-500 text-white scale-110 animate-pulse"
+                    : sttProcessing
+                    ? "bg-yellow-400 text-white animate-pulse"
+                    : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                  }
+                  disabled:opacity-40
+                `}
+                title="按住说话"
+              >
+                🎤
+              </button>
+            )}
+
             <input
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="跟我说点什么..."
+              placeholder={sttSupported ? "打字或按住🎤说话" : "跟我说点什么..."}
               autoFocus
               className="flex-1 bg-transparent px-3 py-2 text-sm focus:outline-none placeholder-gray-400"
             />
@@ -234,10 +245,27 @@ function App() {
               {isLoading ? "..." : "发送"}
             </button>
           </div>
+          {sttError && (
+            <p className="text-[10px] text-red-500 mt-1 px-2">{sttError}</p>
+          )}
         </div>
       )}
 
-      {isLoading && (
+      {/* STT processing indicator */}
+      {sttProcessing && (
+        <div className="absolute top-2 left-2 pointer-events-none">
+          <span className="text-[10px] bg-yellow-400/80 text-white px-2 py-0.5 rounded-full animate-pulse">识别中...</span>
+        </div>
+      )}
+
+      {/* Listening indicator */}
+      {isListening && (
+        <div className="absolute top-2 right-2 pointer-events-none">
+          <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
+        </div>
+      )}
+
+      {isLoading && !isListening && (
         <div className="absolute top-2 right-2 pointer-events-none">
           <div className="w-2 h-2 rounded-full bg-pink-400 animate-pulse" />
         </div>
