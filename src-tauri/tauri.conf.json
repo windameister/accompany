@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegram/nicetauri/refs/heads/main/crates/tauri-utils/schema.json",
+  "productName": "Accompany",
+  "version": "0.1.0",
+  "identifier": "com.accompany.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "character",
+        "title": "Accompany",
+        "width": 320,
+        "height": 400,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "backgroundColor": "#00000000",
+        "skipTaskbar": true,
+        "center": false,
+        "x": 100,
+        "y": 100
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "tooltip": "Accompany - 你的猫娘助手"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
