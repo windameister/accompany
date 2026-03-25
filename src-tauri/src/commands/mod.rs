@@ -260,6 +260,77 @@ except sr.RequestError as e:
     Ok(text)
 }
 
+/// Classify if a speech segment is directed at the assistant.
+/// Returns "direct", "self_talk", or "ignore".
+#[tauri::command]
+pub async fn classify_speech_intent(
+    text: String,
+    agent: State<'_, AgentClient>,
+) -> Result<String, String> {
+    // Quick heuristic for very short utterances
+    if text.chars().count() < 3 {
+        return Ok("ignore".to_string());
+    }
+
+    // Use a lightweight LLM call to classify intent
+    let prompt = format!(
+        r#"你是一个意图分类器。用户独自坐在电脑前，旁边有一个AI猫娘桌面助手在监听。判断这句话的意图。
+
+语音内容: "{}"
+
+重要背景：用户身边只有AI猫娘助手，没有其他人。所以大部分情况下用户说话都是在跟助手对话或者自言自语。
+
+分类规则:
+- "direct": 用户在说话、打招呼、提问、请求、聊天、或任何可以回应的内容（默认选这个）
+- "self_talk": 用户明显在自言自语、碎碎念、叹气
+- "ignore": 只有在内容确实是无意义的噪音、咳嗽、或明显不是对话时才选这个
+
+如果不确定，选 direct。只回复一个词。"#,
+        text.chars().take(200).collect::<String>()
+    );
+
+    let http = reqwest::Client::new();
+    let api_key = std::env::var("MINIMAX_API_KEY").unwrap_or_default();
+
+    let body = serde_json::json!({
+        "model": "MiniMax-M2.7",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 10,
+        "temperature": 0.1
+    });
+
+    let resp = http
+        .post("https://api.minimaxi.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Intent classify failed: {}", e))?;
+
+    let json: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Parse failed: {}", e))?;
+
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("ignore")
+        .trim()
+        .to_lowercase();
+
+    // Extract the classification word
+    let intent = if content.contains("direct") {
+        "direct"
+    } else if content.contains("self_talk") {
+        "self_talk"
+    } else {
+        "ignore"
+    };
+
+    tracing::info!("Speech intent: '{}' → {}", &text[..text.len().min(30)], intent);
+    Ok(intent.to_string())
+}
+
 /// Get all stored memories.
 #[tauri::command]
 pub async fn memory_list(db: State<'_, MemoryDb>) -> Result<Vec<Memory>, String> {

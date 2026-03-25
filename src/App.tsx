@@ -6,6 +6,7 @@ import SpeechBubble from "@/components/character/SpeechBubble";
 import { useCharacterStore } from "@/stores/characterStore";
 import { useAudioQueue } from "@/hooks/useAudioPlayer";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import { useAlwaysListening } from "@/hooks/useAlwaysListening";
 import { chatSend, onCharacterMood, onChatToken } from "@/lib/tauri";
 import type { CharacterMood } from "@/lib/constants";
 
@@ -13,6 +14,7 @@ function App() {
   const [inputVisible, setInputVisible] = useState(false);
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [alwaysListenEnabled] = useState(true);
   const { setMood, showSpeechBubble, clearSpeechBubble } = useCharacterStore();
   const { stop: stopAudio } = useAudioQueue((playing) => {
     if (!playing) {
@@ -57,6 +59,23 @@ function App() {
     stopListening,
     error: sttError,
   } = useSpeechRecognition({ onResult: sendMessage });
+
+  // Always-on voice listening with intent classification
+  const handleAlwaysOnSpeech = useCallback((text: string, intent: "direct" | "self_talk" | "wake_word") => {
+    if (intent === "wake_word" || intent === "direct") {
+      // User is talking to the cat girl
+      sendMessage(text);
+    } else if (intent === "self_talk") {
+      // User is talking to themselves — cat girl proactively responds with care
+      sendMessage(`[用户在自言自语: "${text}"] 请作为猫娘助手，温柔地回应或关心一下`);
+    }
+  }, [sendMessage]);
+
+  const { status: listenStatus } = useAlwaysListening({
+    onSpeech: handleAlwaysOnSpeech,
+    enabled: alwaysListenEnabled,
+    paused: isLoading || isListening || sttProcessing,
+  });
 
   // Listen for mood changes from backend
   useEffect(() => {
@@ -258,18 +277,31 @@ function App() {
         </div>
       )}
 
-      {/* Listening indicator */}
-      {isListening && (
-        <div className="absolute top-2 right-2 pointer-events-none">
-          <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
-        </div>
-      )}
+      {/* Status indicators (top-right) */}
+      <div className="absolute top-2 right-2 flex gap-1 items-center pointer-events-none">
+        {/* Always-on listening status */}
+        {alwaysListenEnabled && !isListening && !isLoading && (
+          <div
+            className={`w-2 h-2 rounded-full transition-colors ${
+              listenStatus === "recording" ? "bg-red-500 animate-pulse" :
+              listenStatus === "processing" ? "bg-yellow-400 animate-pulse" :
+              listenStatus === "listening" ? "bg-green-400" :
+              "bg-gray-300"
+            }`}
+            title={`常驻监听: ${listenStatus}`}
+          />
+        )}
 
-      {isLoading && !isListening && (
-        <div className="absolute top-2 right-2 pointer-events-none">
+        {/* Push-to-talk recording */}
+        {isListening && (
+          <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
+        )}
+
+        {/* Loading */}
+        {isLoading && !isListening && (
           <div className="w-2 h-2 rounded-full bg-pink-400 animate-pulse" />
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

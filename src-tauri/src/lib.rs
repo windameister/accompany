@@ -152,6 +152,7 @@ pub fn run() {
             commands::chat_clear,
             commands::tts_speak,
             commands::stt_recognize,
+            commands::classify_speech_intent,
             commands::memory_list,
             commands::memory_delete,
         ])
