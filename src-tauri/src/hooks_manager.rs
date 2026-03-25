@@ -9,10 +9,21 @@ const ACCOMPANY_MARKER: &str = "accompany-desktop-companion";
 
 /// The hook entries Accompany needs, keyed by event name.
 fn accompany_hook_entry(matcher: &str, path: &str) -> Value {
+    // Read the current auth token (generated on each app startup)
+    let token = crate::claude_monitor::hook_server::read_hook_token()
+        .unwrap_or_default();
+
     json!({
         "_source": ACCOMPANY_MARKER,
         "matcher": matcher,
-        "hooks": [{"type": "http", "url": format!("http://127.0.0.1:{}{}", HOOK_PORT, path), "timeout": 5}]
+        "hooks": [{
+            "type": "http",
+            "url": format!("http://127.0.0.1:{}{}", HOOK_PORT, path),
+            "timeout": 5,
+            "headers": {
+                "X-Accompany-Token": token
+            }
+        }]
     })
 }
 

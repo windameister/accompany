@@ -112,13 +112,14 @@ impl TtsClient {
     }
 
     /// Fallback: use edge-tts (Microsoft Edge neural voices, free, no API key).
+    /// Requires: `pip3 install edge-tts`
     async fn synthesize_edge_tts(&self, text: &str) -> Result<Vec<u8>, String> {
         let tmp = format!("/tmp/accompany_tts_{}_{}.mp3", std::process::id(), ulid::Ulid::new());
         let text = text.to_string();
         let tmp2 = tmp.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            let status = std::process::Command::new("python3")
+            let output = std::process::Command::new("python3")
                 .args([
                     "-m", "edge_tts",
                     "--text", &text,
@@ -126,13 +127,17 @@ impl TtsClient {
                     "--write-media", &tmp2,
                 ])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_err(|e| format!("edge-tts failed: {}", e))?;
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| format!("edge-tts launch failed (is python3 installed?): {}", e))?;
 
-            if !status.success() {
+            if !output.status.success() {
                 let _ = std::fs::remove_file(&tmp2);
-                return Err("edge-tts exited with error".to_string());
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("No module named") {
+                    return Err("edge-tts not installed. Run: pip3 install edge-tts".to_string());
+                }
+                return Err(format!("edge-tts failed: {}", stderr.chars().take(200).collect::<String>()));
             }
 
             let bytes = std::fs::read(&tmp2);

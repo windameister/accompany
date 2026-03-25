@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, middleware, response::IntoResponse, routing::post, Json, Router};
 use base64::Engine;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -8,21 +8,65 @@ use crate::agent::tts::TtsClient;
 
 const ALERT_VOICE: &str = "Chinese (Mandarin)_Cute_Spirit";
 
+/// Token file path for hook authentication.
+fn token_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("accompany")
+        .join("hook_token")
+}
+
+/// Generate and persist a random token for hook auth.
+pub fn generate_hook_token() -> String {
+    let token = ulid::Ulid::new().to_string();
+    let path = token_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &token);
+    token
+}
+
+/// Read the current hook token.
+pub fn read_hook_token() -> Option<String> {
+    std::fs::read_to_string(token_path()).ok().map(|s| s.trim().to_string())
+}
+
 #[derive(Clone)]
 struct HookState {
     tracker: SessionTracker,
     app: AppHandle,
     tts: TtsClient,
-    /// Limit concurrent TTS tasks to 1 (no burst storms)
     tts_semaphore: Arc<tokio::sync::Semaphore>,
+    token: String,
 }
 
 pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, tts: TtsClient) {
+    let token = generate_hook_token();
+    tracing::info!("Hook auth token generated");
+
     let state = HookState {
         tracker,
         app,
         tts,
         tts_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        token: token.clone(),
+    };
+
+    let token_for_check = token.clone();
+    let auth_check = move |req: axum::http::Request<axum::body::Body>, next: middleware::Next| {
+        let expected = token_for_check.clone();
+        async move {
+            let provided = req.headers()
+                .get("X-Accompany-Token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if provided != expected {
+                tracing::warn!("Hook request rejected: invalid token");
+                return Ok(StatusCode::UNAUTHORIZED.into_response());
+            }
+            Ok::<_, std::convert::Infallible>(next.run(req).await)
+        }
     };
 
     let router = Router::new()
@@ -30,6 +74,7 @@ pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, tts: Tts
         .route("/hooks/permission-request", post(handle_permission_request))
         .route("/hooks/notification", post(handle_notification))
         .route("/hooks/stop", post(handle_stop))
+        .layer(middleware::from_fn(auth_check))
         .with_state(state);
 
     let addr = "127.0.0.1:17832";
