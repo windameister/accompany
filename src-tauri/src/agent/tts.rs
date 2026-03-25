@@ -63,9 +63,38 @@ impl TtsClient {
         self.synthesize_edge_tts(text).await
     }
 
-    /// Local TTS via MLX Qwen3-TTS.
+    /// Local TTS via MLX Server (persistent process on port 17833).
+    /// Falls back to bridge script if server is not running.
     async fn synthesize_mlx(&self, text: &str) -> Result<Vec<u8>, String> {
         let tmp = format!("/tmp/accompany_mlx_tts_{}.wav", ulid::Ulid::new());
+
+        // Try MLX Server first (model already loaded, fast)
+        let server_result = self.http
+            .post("http://127.0.0.1:17833/tts")
+            .json(&serde_json::json!({"text": text, "output": &tmp}))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await;
+
+        if let Ok(resp) = server_result {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if json["status"] == "ok" {
+                        let bytes = std::fs::read(&tmp).map_err(|e| format!("Read: {}", e))?;
+                        let _ = std::fs::remove_file(&tmp);
+                        let elapsed = json["elapsed"].as_f64().unwrap_or(0.0);
+                        tracing::info!("MLX Server TTS: {} bytes in {:.1}s", bytes.len(), elapsed);
+                        return Ok(bytes);
+                    }
+                }
+            }
+        }
+
+        // Fallback: bridge script (cold start each time)
+        if self.bridge_script.is_empty() {
+            return Err("MLX not available".to_string());
+        }
+
         let script = self.bridge_script.clone();
         let text = text.to_string();
         let tmp2 = tmp.clone();
@@ -76,10 +105,9 @@ impl TtsClient {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
-                .map_err(|e| format!("MLX bridge launch failed: {}", e))?;
+                .map_err(|e| format!("Bridge failed: {}", e))?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
             if !output.status.success() || !stdout.starts_with("OK:") {
                 let _ = std::fs::remove_file(&tmp2);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -88,12 +116,12 @@ impl TtsClient {
 
             let bytes = std::fs::read(&tmp2);
             let _ = std::fs::remove_file(&tmp2);
-            bytes.map_err(|e| format!("Read audio failed: {}", e))
+            bytes.map_err(|e| format!("Read failed: {}", e))
         })
         .await
         .map_err(|e| format!("Task error: {}", e))??;
 
-        tracing::info!("MLX TTS: {} bytes", result.len());
+        tracing::info!("MLX Bridge TTS: {} bytes", result.len());
         Ok(result)
     }
 

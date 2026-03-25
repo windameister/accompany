@@ -236,18 +236,13 @@ export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListe
 
       console.log("Always-on STT:", text);
 
-      // Step 3: Check wake words
-      const lower = text.toLowerCase();
-      const hasWakeWord = WAKE_WORDS.some(w => lower.includes(w));
-
-      if (hasWakeWord) {
-        onSpeech(text, "wake_word");
-      } else {
-        // Step 4: Classify intent
-        const intent = await invoke<string>("classify_speech_intent", { text });
-        if (intent === "direct" || intent === "self_talk") {
-          onSpeech(text, intent as "direct" | "self_talk");
-        }
+      // If voice is verified as host (or not enrolled yet), just respond.
+      // No intent classification needed — host speaking = respond.
+      // Short noise (<4 chars) is filtered out.
+      if (text.length >= 4) {
+        const lower = text.toLowerCase();
+        const hasWakeWord = WAKE_WORDS.some(w => lower.includes(w));
+        onSpeech(text, hasWakeWord ? "wake_word" : "direct");
       }
     } catch (e) {
       console.warn("Always-on processing error:", e);

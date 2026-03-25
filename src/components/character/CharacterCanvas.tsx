@@ -36,7 +36,17 @@ export default function CharacterCanvas() {
       antialias: true,
       resolution: window.devicePixelRatio || 2,
       autoDensity: true,
+      clearBeforeRender: true,
+      preserveDrawingBuffer: false,
     });
+
+    // Force WebGL to clear with fully transparent color each frame
+    const gl = (app.renderer as any).gl as WebGLRenderingContext | undefined;
+    if (gl) {
+      gl.clearColor(0, 0, 0, 0);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
 
     canvasRef.current.appendChild(app.view as HTMLCanvasElement);
     appRef.current = app;

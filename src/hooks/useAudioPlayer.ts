@@ -87,16 +87,19 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     onPlayStateChange?.(false);
   }, [onPlayStateChange]);
 
-  // Listen for TTS audio chunks from backend
+  // Listen for TTS audio chunks from backend — register once
+  const enqueueRef = useRef(enqueue);
+  enqueueRef.current = enqueue;
+
   useEffect(() => {
     const unlisten = listen<TtsChunk>("tts-audio", (event) => {
-      enqueue(event.payload);
+      enqueueRef.current(event.payload);
     });
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [enqueue]);
+  }, []); // empty deps — only register once
 
   return { stop, isPlayingRef };
 }
