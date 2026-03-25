@@ -153,6 +153,9 @@ pub fn run() {
             commands::tts_speak,
             commands::stt_recognize,
             commands::classify_speech_intent,
+            commands::voice_enroll,
+            commands::voice_verify,
+            commands::voice_is_enrolled,
             commands::memory_list,
             commands::memory_delete,
         ])
