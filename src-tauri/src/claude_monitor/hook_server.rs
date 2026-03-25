@@ -142,30 +142,10 @@ async fn handle_notification(
 
     state.tracker.on_notification(&payload).await;
 
+    // PermissionRequest already handles the full alert with TTS.
+    // Notification just updates state — no duplicate TTS.
     if ntype == "permission_prompt" {
-        let session_id = payload.session_id.as_deref().unwrap_or("?");
-        let sessions = state.tracker.waiting_sessions().await;
-
-        // Find this session's details (tool info from earlier PermissionRequest)
-        let session = sessions.iter().find(|s| s.session_id == session_id);
-
-        let alert_msg = if let Some(s) = session {
-            let tool_desc = s.last_tool.as_deref().unwrap_or("某个操作");
-            format!("{}项目的 Claude 想要使用 {}，需要你批准喵！", s.project_name, tool_desc)
-        } else {
-            // Fallback: use cwd
-            let project = payload.cwd.as_deref()
-                .and_then(|p| p.rsplit('/').next())
-                .unwrap_or("unknown");
-            format!("{}项目的 Claude 在等你操作喵！", project)
-        };
-
-        let project = session.map(|s| s.project_name.as_str())
-            .or_else(|| payload.cwd.as_deref().and_then(|p| p.rsplit('/').next()))
-            .unwrap_or("unknown");
-        let tool = session.and_then(|s| s.last_tool.as_deref()).unwrap_or("unknown");
-
-        emit_alert(&state, session_id, project, tool, &alert_msg, sessions.len()).await;
+        tracing::debug!("permission_prompt notification (TTS already sent via PermissionRequest)");
     }
 
     StatusCode::OK

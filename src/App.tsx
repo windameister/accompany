@@ -46,18 +46,12 @@ function App() {
       showSpeechBubble(message, 0);
       setMood("alert");
 
-      // Make window visible and bounce
+      // Make window visible
       const win = getCurrentWindow();
       await win.show();
       await win.setFocus();
 
-      // TTS the alert
-      try {
-        const audio = await ttsSpeak(message);
-        enqueueAudio(audio);
-      } catch {
-        // TTS failed, bubble is enough
-      }
+      // TTS is handled by backend via tts-audio event — no need to call ttsSpeak here
 
       // Auto-dismiss after 15s if not interacted
       setTimeout(() => {

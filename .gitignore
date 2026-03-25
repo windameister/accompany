@@ -6,3 +6,4 @@ src-tauri/gen/
 *.local
 .DS_Store
 .claude/
+public/live2d/hiyori/.git/
