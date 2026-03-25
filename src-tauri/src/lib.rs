@@ -159,6 +159,22 @@ pub fn run() {
                 tracing::error!("Failed to setup tray: {}", e);
             }
 
+            // macOS: accept first mouse click even when window is not active
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("character") {
+                use objc2_app_kit::NSWindow;
+                use objc2::runtime::AnyObject;
+
+                let ns_win_ptr = window.ns_window()
+                    .expect("Failed to get NSWindow") as *mut AnyObject;
+                let ns_window: &NSWindow = unsafe { &*(ns_win_ptr as *const NSWindow) };
+                unsafe {
+                    ns_window.setAcceptsMouseMovedEvents(true);
+                    ns_window.setMovableByWindowBackground(true);
+                }
+                tracing::info!("macOS: configured window for first-mouse events");
+            }
+
             // Start Claude Code hook server (runs in background on port 17832)
             let tracker = claude_monitor::state::SessionTracker::new();
             let app_handle = app.handle().clone();
