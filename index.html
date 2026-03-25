@@ -7,8 +7,10 @@
   </head>
   <body>
     <div id="root"></div>
-    <!-- Live2D Cubism Core (must load before pixi-live2d-display) -->
+    <!-- Load order matters: CubismCore → PixiJS → Live2D Display -->
     <script src="/live2d/live2dcubismcore.min.js"></script>
+    <script src="/lib/pixi.min.js"></script>
+    <script src="/lib/cubism4.min.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

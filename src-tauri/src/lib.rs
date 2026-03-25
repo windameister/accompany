@@ -181,6 +181,18 @@ pub fn run() {
             tracing::info!("Accompany started successfully! Hook server on :17832, GitHub monitor active, Cmd+Shift+A to toggle.");
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Accompany");
+        .build(tauri::generate_context!())
+        .expect("error while building Accompany")
+        .run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Clean up hooks on exit so Claude sessions don't get connection errors
+                if hooks_manager::is_installed_global() {
+                    if let Err(e) = hooks_manager::uninstall_global() {
+                        tracing::error!("Failed to uninstall hooks on exit: {}", e);
+                    } else {
+                        tracing::info!("Hooks uninstalled on exit");
+                    }
+                }
+            }
+        });
 }
