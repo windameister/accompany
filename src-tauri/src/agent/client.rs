@@ -44,6 +44,7 @@ pub struct AgentClient {
     http: Client,
     api_key: String,
     history: Arc<Mutex<Vec<ChatMessage>>>,
+    memory_context: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AgentClient {
@@ -52,7 +53,13 @@ impl AgentClient {
             http: Client::new(),
             api_key,
             history: Arc::new(Mutex::new(Vec::new())),
+            memory_context: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Set memory context to be included in the next system prompt.
+    pub async fn set_memory_context(&self, context: &str) {
+        *self.memory_context.lock().unwrap() = Some(context.to_string());
     }
 
     /// Send a message and stream the response token by token.
@@ -80,9 +87,18 @@ impl AgentClient {
             content: user_message.to_string(),
         });
 
+        // Build system prompt with memory context
+        let base_prompt = system_prompt();
+        let memory_ctx = self.memory_context.lock().unwrap().take();
+        let full_prompt = if let Some(ctx) = memory_ctx {
+            format!("{}\n\n{}", base_prompt, ctx)
+        } else {
+            base_prompt
+        };
+
         let mut messages = vec![ChatMessage {
             role: "system".into(),
-            content: system_prompt(),
+            content: full_prompt,
         }];
         let start = history.len().saturating_sub(20);
         messages.extend_from_slice(&history[start..]);

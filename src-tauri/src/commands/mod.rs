@@ -7,8 +7,13 @@ use tokio::sync::mpsc;
 use crate::agent::client::AgentClient;
 use crate::agent::models::ModelTier;
 use crate::agent::tts::TtsClient;
+use crate::memory::db::{Memory, MemoryDb};
+use crate::memory::extraction;
 
 const DEFAULT_VOICE: &str = "Chinese (Mandarin)_Cute_Spirit";
+
+/// Holds the API key for memory extraction calls.
+pub struct ApiKeyState(pub String);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatResponse {
@@ -20,29 +25,34 @@ fn is_sentence_end(c: char) -> bool {
     matches!(c, '。' | '！' | '？' | '.' | '!' | '?' | '\n' | '~' | '～')
 }
 
-/// Send a chat message with sentence-level TTS pipelining.
-///
-/// As LLM streams tokens, complete sentences are immediately sent to TTS.
-/// Audio chunks are emitted as "tts-audio" events for the frontend to play in order.
+/// Send a chat message with memory-augmented context + sentence-level TTS pipelining.
 #[tauri::command]
 pub async fn chat_send(
     app: tauri::AppHandle,
     message: String,
     agent: State<'_, AgentClient>,
     tts: State<'_, TtsClient>,
+    memory_db: State<'_, MemoryDb>,
+    api_key: State<'_, ApiKeyState>,
 ) -> Result<ChatResponse, String> {
     let _ = app.emit("character-mood", "thinking");
 
-    // Shared sentence buffer + channel for TTS pipeline
+    // 1. Retrieve relevant memories and inject into context
+    let memories = memory_db.search_memories(&message, 5).await.unwrap_or_default();
+    if !memories.is_empty() {
+        let memory_context = format_memories_for_prompt(&memories);
+        agent.set_memory_context(&memory_context).await;
+        tracing::info!("Injected {} memories into context", memories.len());
+    }
+
+    // 2. Stream LLM response with TTS pipelining
     let sentence_buf = Arc::new(Mutex::new(String::new()));
     let (sentence_tx, sentence_rx) = mpsc::unbounded_channel::<String>();
 
-    // Start TTS consumer immediately (it will wait for sentences)
     let tts_client = tts.inner().clone();
     let app_for_tts = app.clone();
     let tts_handle = tokio::spawn(tts_pipeline(tts_client, app_for_tts, sentence_rx));
 
-    // Stream LLM tokens, splitting into sentences
     let buf = sentence_buf.clone();
     let tx = sentence_tx.clone();
     let app_for_tokens = app.clone();
@@ -54,7 +64,6 @@ pub async fn chat_send(
             let mut buf = buf.lock().unwrap();
             buf.push_str(token);
 
-            // Find the last sentence boundary
             if let Some(pos) = buf
                 .char_indices()
                 .rev()
@@ -70,7 +79,7 @@ pub async fn chat_send(
         })
         .await?;
 
-    // Flush remaining buffer as final sentence
+    // Flush remaining
     {
         let buf = sentence_buf.lock().unwrap();
         let remaining = buf.trim().to_string();
@@ -78,23 +87,45 @@ pub async fn chat_send(
             let _ = sentence_tx.send(remaining);
         }
     }
-
-    // Drop sender to signal TTS pipeline to finish
     drop(sentence_tx);
 
     let _ = app.emit("character-mood", "talking");
-
-    // Wait for all TTS to complete
     let _ = tts_handle.await;
-
     let _ = app.emit("tts-done", ());
-    // Mood will go back to idle after frontend finishes playing
     let _ = app.emit("character-mood", "happy");
+
+    // 3. Extract memories in background (don't block response)
+    let db = memory_db.inner().clone();
+    let key = api_key.0.clone();
+    let msg = message.clone();
+    let resp = content.clone();
+    tokio::spawn(async move {
+        match extraction::extract_memories(&key, &msg, &resp).await {
+            Ok(extracted) => {
+                for mem in extracted {
+                    if mem.confidence >= 0.5 {
+                        let _ = db
+                            .add_memory(&mem.memory_type, &mem.content, "conversation", mem.confidence)
+                            .await;
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Memory extraction failed: {}", e),
+        }
+    });
 
     Ok(ChatResponse {
         content,
         model_tier: tier,
     })
+}
+
+fn format_memories_for_prompt(memories: &[Memory]) -> String {
+    let mut s = String::from("以下是你记住的关于主人的信息：\n");
+    for m in memories {
+        s.push_str(&format!("- [{}] {}\n", m.memory_type, m.content));
+    }
+    s
 }
 
 /// TTS pipeline: consumes sentences and emits audio chunks.
@@ -113,7 +144,6 @@ async fn tts_pipeline(
         match tts.synthesize(&sentence, DEFAULT_VOICE).await {
             Ok(bytes) => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                // Emit with sequence number so frontend can play in order
                 let _ = app.emit("tts-audio", serde_json::json!({
                     "seq": seq,
                     "audio": b64,
@@ -145,4 +175,16 @@ pub async fn tts_speak(
     let voice = voice.unwrap_or_else(|| DEFAULT_VOICE.to_string());
     let bytes = tts.synthesize(&text, &voice).await?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+/// Get all stored memories.
+#[tauri::command]
+pub async fn memory_list(db: State<'_, MemoryDb>) -> Result<Vec<Memory>, String> {
+    db.all_memories().await
+}
+
+/// Delete a memory.
+#[tauri::command]
+pub async fn memory_delete(id: String, db: State<'_, MemoryDb>) -> Result<(), String> {
+    db.delete_memory(&id).await
 }

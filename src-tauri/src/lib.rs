@@ -7,18 +7,35 @@ use tauri::{
 mod agent;
 mod claude_monitor;
 mod commands;
+mod hooks_manager;
+mod memory;
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::PredefinedMenuItem;
+
     let show = MenuItem::with_id(app, "show", "显示猫娘", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "隐藏", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+
+    // Hooks toggle
+    let hooks_installed = hooks_manager::is_installed_global();
+    let hooks_label = if hooks_installed {
+        "✅ Claude Hooks (已安装 · 点击卸载)"
+    } else {
+        "⬜ Claude Hooks (未安装 · 点击安装)"
+    };
+    let hooks_toggle = MenuItem::with_id(app, "hooks_toggle", hooks_label, true, None::<&str>)?;
+
+    let separator2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+
+    let menu = Menu::with_items(app, &[&show, &hide, &separator, &hooks_toggle, &separator2, &quit])?;
 
     TrayIconBuilder::new()
         .menu(&menu)
         .tooltip("Accompany - 你的猫娘助手")
         .icon(app.default_window_icon().unwrap().clone())
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("character") {
                     let _ = window.show();
@@ -28,6 +45,26 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "hide" => {
                 if let Some(window) = app.get_webview_window("character") {
                     let _ = window.hide();
+                }
+            }
+            "hooks_toggle" => {
+                let currently_installed = hooks_manager::is_installed_global();
+                if currently_installed {
+                    match hooks_manager::uninstall_global() {
+                        Ok(_) => {
+                            tracing::info!("Hooks uninstalled from global settings");
+                            let _ = hooks_toggle.set_text("⬜ Claude Hooks (未安装 · 点击安装)");
+                        }
+                        Err(e) => tracing::error!("Failed to uninstall hooks: {}", e),
+                    }
+                } else {
+                    match hooks_manager::install_global() {
+                        Ok(_) => {
+                            tracing::info!("Hooks installed to global settings");
+                            let _ = hooks_toggle.set_text("✅ Claude Hooks (已安装 · 点击卸载)");
+                        }
+                        Err(e) => tracing::error!("Failed to install hooks: {}", e),
+                    }
                 }
             }
             "quit" => {
@@ -71,13 +108,25 @@ pub fn run() {
 
     let agent = agent::client::AgentClient::new(minimax_key.clone());
     let tts = agent::tts::TtsClient::new(minimax_key.clone());
-    let tts_for_hooks = agent::tts::TtsClient::new(minimax_key);
+    let tts_for_hooks = agent::tts::TtsClient::new(minimax_key.clone());
 
-    tracing::info!("AI agent + TTS initialized (MiniMax)");
+    // Initialize memory database
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("accompany");
+    let memory_db = memory::db::MemoryDb::open(&data_dir.join("memory.db"))
+        .expect("Failed to initialize memory database");
+
+    // Store API key for memory extraction
+    let api_key_for_state = minimax_key;
+
+    tracing::info!("AI agent + TTS + Memory initialized (MiniMax)");
 
     tauri::Builder::default()
         .manage(agent)
         .manage(tts)
+        .manage(memory_db)
+        .manage(commands::ApiKeyState(api_key_for_state))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_shortcut("CmdOrCtrl+Shift+A")
@@ -102,6 +151,8 @@ pub fn run() {
             commands::chat_send,
             commands::chat_clear,
             commands::tts_speak,
+            commands::memory_list,
+            commands::memory_delete,
         ])
         .setup(|app| {
             if let Err(e) = setup_tray(app) {
