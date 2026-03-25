@@ -81,27 +81,30 @@ impl AgentClient {
             tier
         );
 
-        let mut history = self.history.lock().await;
-        history.push(ChatMessage {
-            role: "user".into(),
-            content: user_message.to_string(),
-        });
+        // Build messages snapshot, then immediately release the lock
+        let messages = {
+            let mut history = self.history.lock().await;
+            history.push(ChatMessage {
+                role: "user".into(),
+                content: user_message.to_string(),
+            });
 
-        // Build system prompt with memory context
-        let base_prompt = system_prompt();
-        let memory_ctx = self.memory_context.lock().unwrap().take();
-        let full_prompt = if let Some(ctx) = memory_ctx {
-            format!("{}\n\n{}", base_prompt, ctx)
-        } else {
-            base_prompt
-        };
+            let base_prompt = system_prompt();
+            let memory_ctx = self.memory_context.lock().unwrap().take();
+            let full_prompt = if let Some(ctx) = memory_ctx {
+                format!("{}\n\n{}", base_prompt, ctx)
+            } else {
+                base_prompt
+            };
 
-        let mut messages = vec![ChatMessage {
-            role: "system".into(),
-            content: full_prompt,
-        }];
-        let start = history.len().saturating_sub(20);
-        messages.extend_from_slice(&history[start..]);
+            let mut msgs = vec![ChatMessage {
+                role: "system".into(),
+                content: full_prompt,
+            }];
+            let start = history.len().saturating_sub(20);
+            msgs.extend_from_slice(&history[start..]);
+            msgs
+        }; // history lock released here
 
         let request = ChatRequest {
             model: config.model_id.to_string(),
@@ -122,8 +125,8 @@ impl AgentClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            // Remove from history on failure
-            history.pop();
+            // Remove user message from history on failure
+            self.history.lock().await.pop();
             return Err(format!("API error ({}): {}", status, body));
         }
 
@@ -131,7 +134,7 @@ impl AgentClient {
         let mut raw_content = String::new(); // Full raw output (including <think>)
         let mut visible_content = String::new(); // Content shown to user (no <think>)
         let mut buffer = String::new();
-        let mut in_think = false; // Track if inside <think> block
+        let mut think_filter = ThinkFilter::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
@@ -154,10 +157,7 @@ impl AgentClient {
                                         raw_content.push_str(content);
 
                                         // Filter out <think>...</think> blocks
-                                        let filtered = filter_think_tokens(
-                                            content,
-                                            &mut in_think,
-                                        );
+                                        let filtered = think_filter.process(content);
                                         if !filtered.is_empty() {
                                             visible_content.push_str(&filtered);
                                             on_token(&filtered);
@@ -171,8 +171,15 @@ impl AgentClient {
             }
         }
 
-        // Store full raw content in history (model needs it for context)
-        history.push(ChatMessage {
+        // Flush any pending content from think filter
+        let remaining = think_filter.flush();
+        if !remaining.is_empty() {
+            visible_content.push_str(&remaining);
+            on_token(&remaining);
+        }
+
+        // Store full raw content in history (re-acquire lock briefly)
+        self.history.lock().await.push(ChatMessage {
             role: "assistant".into(),
             content: raw_content,
         });
@@ -187,39 +194,89 @@ impl AgentClient {
     }
 }
 
-/// Filter out `<think>...</think>` content from streaming tokens.
-///
-/// Since tokens arrive in small chunks, the `<think>` and `</think>` tags
-/// may be split across multiple tokens. We track state with `in_think`.
-fn filter_think_tokens(token: &str, in_think: &mut bool) -> String {
-    let mut result = String::new();
-    let mut remaining = token;
+/// Stateful filter for `<think>...</think>` blocks in streaming tokens.
+/// Handles tags split across multiple tokens by buffering partial matches.
+struct ThinkFilter {
+    in_think: bool,
+    /// Buffer for potential partial tag at the end of a token
+    pending: String,
+}
 
-    while !remaining.is_empty() {
-        if *in_think {
-            // Look for </think> to exit thinking mode
-            if let Some(end_pos) = remaining.find("</think>") {
-                *in_think = false;
-                remaining = &remaining[end_pos + 8..]; // skip past </think>
-            } else {
-                // Still inside think block, skip everything
-                // But check if we have a partial "</think" at the end
-                break;
-            }
-        } else {
-            // Look for <think> to enter thinking mode
-            if let Some(start_pos) = remaining.find("<think>") {
-                // Emit everything before <think>
-                result.push_str(&remaining[..start_pos]);
-                *in_think = true;
-                remaining = &remaining[start_pos + 7..]; // skip past <think>
-            } else {
-                // No think tag, emit everything
-                result.push_str(remaining);
-                break;
-            }
+impl ThinkFilter {
+    fn new() -> Self {
+        Self {
+            in_think: false,
+            pending: String::new(),
         }
     }
 
-    result
+    /// Process a new token. Returns the visible (non-think) content to emit.
+    fn process(&mut self, token: &str) -> String {
+        // Prepend any pending partial from last token
+        let input = if self.pending.is_empty() {
+            token.to_string()
+        } else {
+            let mut s = std::mem::take(&mut self.pending);
+            s.push_str(token);
+            s
+        };
+
+        let mut result = String::new();
+        let mut pos = 0;
+        let bytes = input.as_bytes();
+
+        while pos < input.len() {
+            if self.in_think {
+                // Look for </think>
+                if let Some(end) = input[pos..].find("</think>") {
+                    self.in_think = false;
+                    pos += end + 8; // skip past </think>
+                } else {
+                    // Check for partial </think at end
+                    let tail = &input[pos..];
+                    if "</think>".starts_with(tail) && tail.starts_with('<') {
+                        self.pending = tail.to_string();
+                    }
+                    break;
+                }
+            } else {
+                // Look for <think>
+                if let Some(start) = input[pos..].find("<think>") {
+                    result.push_str(&input[pos..pos + start]);
+                    self.in_think = true;
+                    pos += start + 7; // skip past <think>
+                } else {
+                    // Check for partial <think at end
+                    let tail = &input[pos..];
+                    // Find if any suffix of tail is a prefix of "<think>"
+                    let mut partial_len = 0;
+                    for i in 1..=tail.len().min(7) {
+                        let suffix = &tail[tail.len() - i..];
+                        if "<think>".starts_with(suffix) {
+                            partial_len = i;
+                            break;
+                        }
+                    }
+                    if partial_len > 0 {
+                        result.push_str(&tail[..tail.len() - partial_len]);
+                        self.pending = tail[tail.len() - partial_len..].to_string();
+                    } else {
+                        result.push_str(tail);
+                    }
+                    break;
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Flush any remaining pending content (call at end of stream).
+    fn flush(&mut self) -> String {
+        if self.in_think {
+            String::new() // discard pending think content
+        } else {
+            std::mem::take(&mut self.pending)
+        }
+    }
 }

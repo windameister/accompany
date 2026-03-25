@@ -75,65 +75,71 @@ pub async fn start_github_monitor(app: AppHandle, tts: TtsClient) {
                 }
             };
 
-            // Check for newly completed runs
-            let mut seen_lock = seen.lock().await;
-            let last_seen_id = seen_lock.get(*repo).copied().unwrap_or(0);
+            // Collect new runs under lock, then release before doing TTS
+            let new_runs: Vec<(String, String, String)> = {
+                let mut seen_lock = seen.lock().await;
+                let last_seen_id = seen_lock.get(*repo).copied().unwrap_or(0);
 
-            for run in &runs {
-                if run.id <= last_seen_id {
-                    break; // Already seen
+                let mut new = Vec::new();
+                for run in &runs {
+                    if run.id <= last_seen_id {
+                        break;
+                    }
+                    if run.status != "completed" {
+                        continue;
+                    }
+                    let conclusion = run.conclusion.clone().unwrap_or_else(|| "unknown".into());
+                    new.push((run.name.clone(), conclusion, run.html_url.clone()));
                 }
-                if run.status != "completed" {
-                    continue; // Still running
+
+                // Update last seen immediately
+                if let Some(latest) = runs.first() {
+                    seen_lock.insert(repo.to_string(), latest.id);
                 }
 
-                let repo_short = repo.rsplit('/').next().unwrap_or(repo);
-                let conclusion = run.conclusion.as_deref().unwrap_or("unknown");
+                new
+            }; // lock released
 
-                let (msg, mood) = match conclusion {
+            // Process notifications without holding the lock
+            let repo_short = repo.rsplit('/').next().unwrap_or(repo);
+            for (name, conclusion, url) in &new_runs {
+                let (msg, mood) = match conclusion.as_str() {
                     "success" => (
-                        format!("{}的{}部署成功了喵~", repo_short, run.name),
+                        format!("{}的{}部署成功了喵~", repo_short, name),
                         "happy",
                     ),
                     "failure" => (
-                        format!("{}的{}失败了！快看看喵！", repo_short, run.name),
+                        format!("{}的{}失败了！快看看喵！", repo_short, name),
                         "alert",
                     ),
                     "cancelled" => (
-                        format!("{}的{}被取消了", repo_short, run.name),
+                        format!("{}的{}被取消了", repo_short, name),
                         "idle",
                     ),
                     _ => (
-                        format!("{}的{}状态: {}", repo_short, run.name, conclusion),
+                        format!("{}的{}状态: {}", repo_short, name, conclusion),
                         "idle",
                     ),
                 };
 
-                tracing::info!("GitHub: {} - {} ({})", repo, run.name, conclusion);
+                tracing::info!("GitHub: {} - {} ({})", repo, name, conclusion);
 
                 let _ = app.emit("character-mood", mood);
                 let _ = app.emit("github-action", serde_json::json!({
                     "repo": repo,
-                    "name": run.name,
+                    "name": name,
                     "conclusion": conclusion,
-                    "url": run.html_url,
+                    "url": url,
                     "message": msg,
                 }));
 
-                // TTS alert for failures, quiet notification for success
                 if conclusion == "failure" {
-                    // Voice alert for failures
                     emit_tts(&app, &tts, &msg).await;
                 } else if conclusion == "success" {
-                    // Just speech bubble for success
                     let _ = app.emit("github-notify", msg);
                 }
             }
 
-            // Update last seen
-            if let Some(latest) = runs.first() {
-                seen_lock.insert(repo.to_string(), latest.id);
-            }
         }
     }
 }

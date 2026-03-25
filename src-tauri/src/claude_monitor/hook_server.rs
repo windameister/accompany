@@ -1,5 +1,6 @@
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use base64::Engine;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use super::state::{HookPayload, SessionTracker};
@@ -12,10 +13,17 @@ struct HookState {
     tracker: SessionTracker,
     app: AppHandle,
     tts: TtsClient,
+    /// Limit concurrent TTS tasks to 1 (no burst storms)
+    tts_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, tts: TtsClient) {
-    let state = HookState { tracker, app, tts };
+    let state = HookState {
+        tracker,
+        app,
+        tts,
+        tts_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+    };
 
     let router = Router::new()
         .route("/hooks/session-start", post(handle_session_start))
@@ -77,11 +85,20 @@ fn emit_alert(state: &HookState, session_id: &str, project: &str, tool: &str, me
     }));
     let _ = state.app.emit("character-mood", "alert");
 
-    // Spawn TTS in background so we don't block the HTTP response
+    // Spawn TTS in background with semaphore (max 1 concurrent TTS task)
     let tts = state.tts.clone();
     let app = state.app.clone();
+    let sem = state.tts_semaphore.clone();
     let msg = message.to_string();
     tokio::spawn(async move {
+        // Try to acquire semaphore; if another TTS is running, skip this one
+        let _permit = match sem.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::debug!("Skipping alert TTS (another already in progress)");
+                return;
+            }
+        };
         match tts.synthesize(&msg, ALERT_VOICE).await {
             Ok(bytes) => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);

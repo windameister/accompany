@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 export interface ChatResponse {
   content: string;
   model_tier: "light" | "standard" | "heavy";
-  audio_base64: string | null;
 }
 
 export async function chatSend(message: string): Promise<ChatResponse> {
