@@ -30,7 +30,9 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     const chunk = queueRef.current.shift()!;
     currentSourceRef.current = chunk.source;
 
-    const blob = base64ToBlob(chunk.audio, "audio/mp3");
+    // Auto-detect format: WAV starts with "UklGR" in base64 (RIFF header)
+    const mime = chunk.audio.startsWith("UklGR") ? "audio/wav" : "audio/mp3";
+    const blob = base64ToBlob(chunk.audio, mime);
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     audioRef.current = audio;

@@ -1,9 +1,10 @@
 use reqwest::Client;
 use serde::Deserialize;
+use std::process::Stdio;
 
 const MINIMAX_TTS_URL: &str = "https://api.minimaxi.com/v1/t2a_v2";
 
-/// TTS client using MiniMax Speech 2.8 API.
+/// TTS client with MiniMax API primary + macOS `say` fallback.
 #[derive(Clone)]
 pub struct TtsClient {
     http: Client,
@@ -18,7 +19,7 @@ struct TtsResponse {
 
 #[derive(Debug, Deserialize)]
 struct TtsData {
-    audio: Option<String>, // hex-encoded audio bytes
+    audio: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,14 +36,22 @@ impl TtsClient {
         }
     }
 
-    /// Synthesize speech from text. Returns raw audio bytes (mp3).
+    /// Synthesize speech. Tries MiniMax API first, falls back to macOS `say`.
     pub async fn synthesize(&self, text: &str, voice_id: &str) -> Result<Vec<u8>, String> {
-        // Truncate to API limit (10000 chars)
-        let text = if text.len() > 9000 {
-            &text[..9000]
-        } else {
-            text
-        };
+        // Try MiniMax API first
+        match self.synthesize_minimax(text, voice_id).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                tracing::warn!("MiniMax TTS failed ({}), using macOS say fallback", e);
+            }
+        }
+
+        // Fallback: edge-tts (Microsoft neural voices, free)
+        self.synthesize_edge_tts(text).await
+    }
+
+    async fn synthesize_minimax(&self, text: &str, voice_id: &str) -> Result<Vec<u8>, String> {
+        let text = if text.len() > 9000 { &text[..9000] } else { text };
 
         let body = serde_json::json!({
             "model": "speech-2.8-hd",
@@ -61,8 +70,6 @@ impl TtsClient {
             "output_format": "hex"
         });
 
-        tracing::info!("TTS request: {} chars, voice={}", text.len(), voice_id);
-
         let response = self
             .http
             .post(MINIMAX_TTS_URL)
@@ -71,39 +78,73 @@ impl TtsClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("TTS request failed: {}", e))?;
+            .map_err(|e| format!("Request failed: {}", e))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
-            return Err(format!("TTS API error ({}): {}", status, err_body));
+        if !response.status().is_success() {
+            let err = response.text().await.unwrap_or_default();
+            return Err(format!("API error: {}", err));
         }
 
         let tts_resp: TtsResponse = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse TTS response: {}", e))?;
+            .map_err(|e| format!("Parse failed: {}", e))?;
 
-        // Check for API-level errors
         if let Some(base) = &tts_resp.base_resp {
             if let Some(code) = base.status_code {
                 if code != 0 {
                     let msg = base.status_msg.as_deref().unwrap_or("unknown");
-                    return Err(format!("TTS error (code {}): {}", code, msg));
+                    return Err(format!("code {}: {}", code, msg));
                 }
             }
         }
 
-        // Decode hex string to bytes
         let hex_audio = tts_resp
             .data
             .and_then(|d| d.audio)
-            .ok_or("TTS response missing audio data")?;
+            .ok_or("Missing audio data")?;
 
         let bytes = hex::decode(&hex_audio)
-            .map_err(|e| format!("Failed to decode hex audio: {}", e))?;
+            .map_err(|e| format!("Hex decode failed: {}", e))?;
 
-        tracing::info!("TTS response: {} bytes audio", bytes.len());
+        tracing::info!("MiniMax TTS: {} bytes", bytes.len());
         Ok(bytes)
+    }
+
+    /// Fallback: use edge-tts (Microsoft Edge neural voices, free, no API key).
+    async fn synthesize_edge_tts(&self, text: &str) -> Result<Vec<u8>, String> {
+        let tmp = format!("/tmp/accompany_tts_{}.mp3", std::process::id());
+        let text = text.to_string();
+        let tmp2 = tmp.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let status = std::process::Command::new("python3")
+                .args([
+                    "-m", "edge_tts",
+                    "--text", &text,
+                    "--voice", "zh-CN-XiaoxiaoNeural",
+                    "--write-media", &tmp2,
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map_err(|e| format!("edge-tts failed: {}", e))?;
+
+            if !status.success() {
+                return Err("edge-tts exited with error".to_string());
+            }
+
+            let bytes = std::fs::read(&tmp2)
+                .map_err(|e| format!("Failed to read audio: {}", e))?;
+
+            let _ = std::fs::remove_file(&tmp2);
+
+            Ok(bytes)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+
+        tracing::info!("edge-tts fallback: {} bytes", result.len());
+        Ok(result)
     }
 }
