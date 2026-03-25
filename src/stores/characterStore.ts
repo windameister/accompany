@@ -11,6 +11,8 @@ interface CharacterState {
   clearSpeechBubble: () => void;
 }
 
+let bubbleTimer: ReturnType<typeof setTimeout> | null = null;
+
 export const useCharacterStore = create<CharacterState>((set) => ({
   mood: "idle",
   isBouncing: false,
@@ -20,11 +22,25 @@ export const useCharacterStore = create<CharacterState>((set) => ({
   setBouncing: (isBouncing) => set({ isBouncing }),
 
   showSpeechBubble: (text, durationMs = 4000) => {
+    // Cancel any previous auto-dismiss timer
+    if (bubbleTimer) {
+      clearTimeout(bubbleTimer);
+      bubbleTimer = null;
+    }
     set({ speechBubble: text });
     if (durationMs > 0) {
-      setTimeout(() => set({ speechBubble: null }), durationMs);
+      bubbleTimer = setTimeout(() => {
+        set({ speechBubble: null });
+        bubbleTimer = null;
+      }, durationMs);
     }
   },
 
-  clearSpeechBubble: () => set({ speechBubble: null }),
+  clearSpeechBubble: () => {
+    if (bubbleTimer) {
+      clearTimeout(bubbleTimer);
+      bubbleTimer = null;
+    }
+    set({ speechBubble: null });
+  },
 }));

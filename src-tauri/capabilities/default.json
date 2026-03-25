@@ -15,7 +15,6 @@
     "core:window:allow-set-ignore-cursor-events",
     "global-shortcut:default",
     "notification:default",
-    "notification:allow-notify",
-    "shell:default"
+    "notification:allow-notify"
   ]
 }

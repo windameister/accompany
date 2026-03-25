@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useChatStore } from "@/stores/chatStore";
 import { useCharacterStore } from "@/stores/characterStore";
 import { chatSend, onChatToken } from "@/lib/tauri";

@@ -4,26 +4,33 @@ import { listen } from "@tauri-apps/api/event";
 interface TtsChunk {
   seq: number;
   audio: string; // base64
+  source: string; // "chat" | "alert" | "github"
 }
 
 /**
- * Audio player that queues TTS chunks and plays them in order.
- * Listens for "tts-audio" events from the backend.
+ * Audio player with priority-based queue.
+ * - "alert" and "github" sources interrupt current chat audio
+ * - Same-source audio plays in order
+ * - Listens for "tts-audio" events from backend
  */
 export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
-  const queueRef = useRef<string[]>([]); // base64 audio queue
+  const queueRef = useRef<TtsChunk[]>([]);
   const isPlayingRef = useRef(false);
+  const currentSourceRef = useRef<string>("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const playNext = useCallback(() => {
     if (queueRef.current.length === 0) {
       isPlayingRef.current = false;
+      currentSourceRef.current = "";
       onPlayStateChange?.(false);
       return;
     }
 
-    const b64 = queueRef.current.shift()!;
-    const blob = base64ToBlob(b64, "audio/mp3");
+    const chunk = queueRef.current.shift()!;
+    currentSourceRef.current = chunk.source;
+
+    const blob = base64ToBlob(chunk.audio, "audio/mp3");
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     audioRef.current = audio;
@@ -31,25 +38,33 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     audio.onended = () => {
       URL.revokeObjectURL(url);
       audioRef.current = null;
-      playNext(); // Play next chunk
+      playNext();
     };
 
     audio.onerror = () => {
       URL.revokeObjectURL(url);
       audioRef.current = null;
-      playNext(); // Skip failed chunk
+      playNext();
     };
 
-    audio.play().catch(() => {
-      playNext();
-    });
+    audio.play().catch(() => playNext());
   }, [onPlayStateChange]);
 
   const enqueue = useCallback(
-    (base64Audio: string) => {
-      queueRef.current.push(base64Audio);
+    (chunk: TtsChunk) => {
+      // Alert/github sources interrupt ongoing chat audio
+      if (chunk.source !== "chat" && currentSourceRef.current === "chat") {
+        // Clear remaining chat chunks
+        queueRef.current = queueRef.current.filter((c) => c.source !== "chat");
+        // Stop current playback
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+      }
 
-      // Start playing if not already
+      queueRef.current.push(chunk);
+
       if (!isPlayingRef.current) {
         isPlayingRef.current = true;
         onPlayStateChange?.(true);
@@ -66,13 +81,14 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
       audioRef.current = null;
     }
     isPlayingRef.current = false;
+    currentSourceRef.current = "";
     onPlayStateChange?.(false);
   }, [onPlayStateChange]);
 
   // Listen for TTS audio chunks from backend
   useEffect(() => {
     const unlisten = listen<TtsChunk>("tts-audio", (event) => {
-      enqueue(event.payload.audio);
+      enqueue(event.payload);
     });
 
     return () => {
@@ -80,7 +96,7 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     };
   }, [enqueue]);
 
-  return { enqueue, stop, isPlayingRef };
+  return { stop, isPlayingRef };
 }
 
 function base64ToBlob(base64: string, mimeType: string): Blob {

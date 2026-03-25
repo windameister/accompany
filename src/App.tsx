@@ -5,17 +5,17 @@ import CharacterCanvas from "@/components/character/CharacterCanvas";
 import SpeechBubble from "@/components/character/SpeechBubble";
 import { useCharacterStore } from "@/stores/characterStore";
 import { useAudioQueue } from "@/hooks/useAudioPlayer";
-import { chatSend, ttsSpeak, onCharacterMood, onChatToken } from "@/lib/tauri";
+import { chatSend, onCharacterMood, onChatToken } from "@/lib/tauri";
 import type { CharacterMood } from "@/lib/constants";
 
 function App() {
   const [inputVisible, setInputVisible] = useState(false);
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const { mood, setMood, showSpeechBubble, clearSpeechBubble } = useCharacterStore();
+  const { setMood, showSpeechBubble, clearSpeechBubble } = useCharacterStore();
 
   // Audio queue — plays TTS chunks as they arrive
-  const { stop: stopAudio, enqueue: enqueueAudio } = useAudioQueue((playing) => {
+  const { stop: stopAudio } = useAudioQueue((playing) => {
     if (!playing) {
       // Audio finished playing
       setTimeout(() => {
@@ -40,7 +40,7 @@ function App() {
       message: string;
       waiting_count: number;
     }>("claude-needs-approval", async (event) => {
-      const { message, waiting_count } = event.payload;
+      const { message } = event.payload;
 
       // Show alert bubble
       showSpeechBubble(message, 0);

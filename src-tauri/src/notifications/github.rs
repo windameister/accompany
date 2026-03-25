@@ -190,6 +190,7 @@ async fn emit_tts(app: &AppHandle, tts: &TtsClient, message: &str) {
             let _ = app.emit("tts-audio", serde_json::json!({
                 "seq": 0,
                 "audio": b64,
+                "source": "github",
             }));
         }
         Err(e) => tracing::warn!("GitHub TTS failed: {}", e),

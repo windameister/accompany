@@ -84,6 +84,7 @@ async fn emit_alert(state: &HookState, session_id: &str, project: &str, tool: &s
             let _ = state.app.emit("tts-audio", serde_json::json!({
                 "seq": 0,
                 "audio": b64,
+                "source": "alert",
             }));
             tracing::info!("Alert TTS: {} bytes", bytes.len());
         }

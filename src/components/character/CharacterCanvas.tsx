@@ -43,10 +43,16 @@ export default function CharacterCanvas() {
 
     let destroyed = false;
 
+    // Register ticker for Live2D auto-update (motions, physics, etc.)
+    Live2DModel.registerTicker(PIXI.Ticker);
+
     (async () => {
       try {
         const model = await Live2DModel.from(MODEL_PATH);
-        if (destroyed) return;
+        if (destroyed) {
+          model.destroy();
+          return;
+        }
 
         modelRef.current = model;
 
@@ -58,6 +64,9 @@ export default function CharacterCanvas() {
         model.anchor.set(0.5, 0.5);
         model.x = app.screen.width / 2;
         model.y = app.screen.height / 2;
+
+        // Enable mouse/cursor tracking for eye follow
+        model.trackedPointers = [0];
 
         app.stage.addChild(model);
         model.motion("Idle", 0);

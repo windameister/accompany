@@ -147,6 +147,7 @@ async fn tts_pipeline(
                 let _ = app.emit("tts-audio", serde_json::json!({
                     "seq": seq,
                     "audio": b64,
+                    "source": "chat",
                 }));
                 seq += 1;
             }

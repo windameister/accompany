@@ -147,7 +147,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::chat_send,
             commands::chat_clear,

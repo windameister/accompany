@@ -10,7 +10,7 @@ fn hooks_config() -> Value {
             "matcher": "",
             "hooks": [{
                 "type": "http",
-                "url": format!("http://localhost:{}/hooks/session-start", HOOK_PORT),
+                "url": format!("http://127.0.0.1:{}/hooks/session-start", HOOK_PORT),
                 "timeout": 5
             }]
         }],
@@ -18,7 +18,7 @@ fn hooks_config() -> Value {
             "matcher": "",
             "hooks": [{
                 "type": "http",
-                "url": format!("http://localhost:{}/hooks/permission-request", HOOK_PORT),
+                "url": format!("http://127.0.0.1:{}/hooks/permission-request", HOOK_PORT),
                 "timeout": 5
             }]
         }],
@@ -26,7 +26,7 @@ fn hooks_config() -> Value {
             "matcher": "permission_prompt",
             "hooks": [{
                 "type": "http",
-                "url": format!("http://localhost:{}/hooks/notification", HOOK_PORT),
+                "url": format!("http://127.0.0.1:{}/hooks/notification", HOOK_PORT),
                 "timeout": 5
             }]
         }],
@@ -34,7 +34,7 @@ fn hooks_config() -> Value {
             "matcher": "",
             "hooks": [{
                 "type": "http",
-                "url": format!("http://localhost:{}/hooks/stop", HOOK_PORT),
+                "url": format!("http://127.0.0.1:{}/hooks/stop", HOOK_PORT),
                 "timeout": 5
             }]
         }]
