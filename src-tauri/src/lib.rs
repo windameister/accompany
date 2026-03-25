@@ -182,16 +182,8 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Accompany")
-        .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                // Clean up hooks on exit so Claude sessions don't get connection errors
-                if hooks_manager::is_installed_global() {
-                    if let Err(e) = hooks_manager::uninstall_global() {
-                        tracing::error!("Failed to uninstall hooks on exit: {}", e);
-                    } else {
-                        tracing::info!("Hooks uninstalled on exit");
-                    }
-                }
-            }
-        });
+        // Hooks stay installed after exit — they timeout gracefully (5s) when
+        // the server isn't running. This is intentional: user explicitly installs
+        // hooks via tray menu, and they persist until explicitly uninstalled.
+        .run(|_app, _event| {});
 }

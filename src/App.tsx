@@ -94,48 +94,36 @@ function App() {
     };
   }, [showSpeechBubble]);
 
-  // Click-through on transparent areas + drag on character
+  // Click-through: ignore cursor on transparent areas, capture on character/UI
   useEffect(() => {
     const win = getCurrentWindow();
     let ignoring = false;
 
-    const handleMouseMove = async (e: MouseEvent) => {
-      // Check if mouse is over a non-transparent pixel on the canvas
-      const canvas = document.querySelector("canvas") as HTMLCanvasElement | null;
-      const isOverUI = (e.target as HTMLElement).closest("[data-no-drag]");
+    // Character occupies roughly center of 320x400 window
+    // Live2D model is anchored at center, scaled to ~85% of window
+    // Approximate elliptical hit zone
+    const isOverCharacter = (x: number, y: number) => {
+      const cx = 160, cy = 200; // center of window
+      const rx = 80, ry = 160;  // ellipse radii (character is taller than wide)
+      const dx = (x - cx) / rx;
+      const dy = (y - cy) / ry;
+      return dx * dx + dy * dy <= 1.0;
+    };
 
-      if (isOverUI) {
+    const handleMouseMove = async (e: MouseEvent) => {
+      const isOverUI = (e.target as HTMLElement).closest("[data-no-drag]");
+      const overChar = isOverCharacter(e.clientX, e.clientY);
+
+      if (isOverUI || overChar) {
         if (ignoring) {
           await win.setIgnoreCursorEvents(false);
           ignoring = false;
         }
-        return;
-      }
-
-      if (canvas) {
-        const rect = canvas.getBoundingClientRect();
-        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (ctx) {
-          const pixel = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
-          const isTransparent = pixel[3] < 10; // alpha < 10 = transparent
-
-          if (isTransparent && !ignoring) {
-            await win.setIgnoreCursorEvents(true);
-            ignoring = true;
-          } else if (!isTransparent && ignoring) {
-            await win.setIgnoreCursorEvents(false);
-            ignoring = false;
-          }
-          return;
+      } else {
+        if (!ignoring) {
+          await win.setIgnoreCursorEvents(true);
+          ignoring = true;
         }
-      }
-
-      // Fallback: if no canvas, don't ignore
-      if (ignoring) {
-        await win.setIgnoreCursorEvents(false);
-        ignoring = false;
       }
     };
 
@@ -147,11 +135,21 @@ function App() {
       }
     };
 
+    // Also handle mouse leaving the window entirely
+    const handleMouseLeave = async () => {
+      if (ignoring) {
+        await win.setIgnoreCursorEvents(false);
+        ignoring = false;
+      }
+    };
+
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("mouseleave", handleMouseLeave);
     return () => {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("mouseleave", handleMouseLeave);
       if (ignoring) win.setIgnoreCursorEvents(false);
     };
   }, []);

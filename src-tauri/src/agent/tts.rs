@@ -113,7 +113,7 @@ impl TtsClient {
 
     /// Fallback: use edge-tts (Microsoft Edge neural voices, free, no API key).
     async fn synthesize_edge_tts(&self, text: &str) -> Result<Vec<u8>, String> {
-        let tmp = format!("/tmp/accompany_tts_{}.mp3", std::process::id());
+        let tmp = format!("/tmp/accompany_tts_{}_{}.mp3", std::process::id(), ulid::Ulid::new());
         let text = text.to_string();
         let tmp2 = tmp.clone();
 
@@ -131,13 +131,13 @@ impl TtsClient {
                 .map_err(|e| format!("edge-tts failed: {}", e))?;
 
             if !status.success() {
+                let _ = std::fs::remove_file(&tmp2);
                 return Err("edge-tts exited with error".to_string());
             }
 
-            let bytes = std::fs::read(&tmp2)
-                .map_err(|e| format!("Failed to read audio: {}", e))?;
-
-            let _ = std::fs::remove_file(&tmp2);
+            let bytes = std::fs::read(&tmp2);
+            let _ = std::fs::remove_file(&tmp2); // Always clean up
+            let bytes = bytes.map_err(|e| format!("Failed to read audio: {}", e))?;
 
             Ok(bytes)
         })

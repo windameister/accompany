@@ -56,13 +56,13 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     (chunk: TtsChunk) => {
       // Alert/github sources interrupt ongoing chat audio
       if (chunk.source !== "chat" && currentSourceRef.current === "chat") {
-        // Clear remaining chat chunks
         queueRef.current = queueRef.current.filter((c) => c.source !== "chat");
-        // Stop current playback
         if (audioRef.current) {
           audioRef.current.pause();
           audioRef.current = null;
         }
+        // Reset playing state so the new chunk triggers playback
+        isPlayingRef.current = false;
       }
 
       queueRef.current.push(chunk);
