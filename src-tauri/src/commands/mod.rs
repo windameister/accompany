@@ -342,144 +342,89 @@ pub async fn classify_speech_intent(
     Ok(intent.to_string())
 }
 
-/// Voiceprint store path.
-fn voiceprint_path() -> String {
-    dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("accompany")
-        .join("voiceprint.json")
-        .to_string_lossy()
-        .to_string()
+const MLX_SERVER: &str = "http://127.0.0.1:17833";
+
+/// Save audio base64 to a WAV file (ffmpeg converts from MediaRecorder format).
+async fn save_audio_as_wav(audio_base64: &str) -> Result<String, String> {
+    let audio_bytes = base64::engine::general_purpose::STANDARD
+        .decode(audio_base64)
+        .map_err(|e| format!("Invalid base64: {}", e))?;
+
+    let tmp = format!("/tmp/accompany_audio_{}", ulid::Ulid::new());
+    let raw_path = format!("{}.audio", tmp);
+    let wav_path = format!("{}.wav", tmp);
+
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&raw_path, &audio_bytes)
+            .map_err(|e| format!("Write failed: {}", e))?;
+        let ffmpeg = std::process::Command::new("ffmpeg")
+            .args(["-y", "-i", &raw_path, "-ar", "16000", "-ac", "1", &wav_path])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("ffmpeg: {}", e))?;
+        let _ = std::fs::remove_file(&raw_path);
+        if !ffmpeg.success() { return Err("ffmpeg failed".to_string()); }
+        Ok(wav_path)
+    })
+    .await
+    .map_err(|e| format!("Task: {}", e))?
 }
 
-/// Path to voiceprint.py script (relative to project root).
-fn voiceprint_script() -> String {
-    // In dev: scripts/voiceprint.py relative to src-tauri parent
-    let candidates = [
-        std::env::current_dir()
-            .ok()
-            .map(|p| p.parent().unwrap_or(&p).join("scripts/voiceprint.py")),
-        std::env::current_dir()
-            .ok()
-            .map(|p| p.join("scripts/voiceprint.py")),
-    ];
-    for c in candidates.into_iter().flatten() {
-        if c.exists() {
-            return c.to_string_lossy().to_string();
-        }
-    }
-    "scripts/voiceprint.py".to_string()
-}
-
-/// Enroll a voice sample for host recognition.
-/// audio_base64: base64 encoded audio from MediaRecorder.
+/// Enroll a voice sample via MLX Server.
 #[tauri::command]
 pub async fn voice_enroll(audio_base64: String) -> Result<serde_json::Value, String> {
-    let audio_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&audio_base64)
-        .map_err(|e| format!("Invalid base64: {}", e))?;
+    let wav_path = save_audio_as_wav(&audio_base64).await?;
+    let http = reqwest::Client::new();
 
-    let tmp_base = format!("/tmp/accompany_enroll_{}_{}", std::process::id(), ulid::Ulid::new());
-    let script = voiceprint_script();
-    let store = voiceprint_path();
+    let resp = http
+        .post(format!("{}/enroll", MLX_SERVER))
+        .json(&serde_json::json!({"audio": wav_path}))
+        .send()
+        .await
+        .map_err(|e| format!("MLX Server enroll failed: {}", e))?;
 
-    tokio::task::spawn_blocking(move || {
-        // Save and convert to WAV
-        let raw_path = format!("{}.audio", tmp_base);
-        let wav_path = format!("{}.wav", tmp_base);
-        std::fs::write(&raw_path, &audio_bytes)
-            .map_err(|e| format!("Write failed: {}", e))?;
+    let _ = std::fs::remove_file(&wav_path);
 
-        let ffmpeg = std::process::Command::new("ffmpeg")
-            .args(["-y", "-i", &raw_path, "-ar", "16000", "-ac", "1", &wav_path])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("ffmpeg: {}", e))?;
-        let _ = std::fs::remove_file(&raw_path);
-        if !ffmpeg.success() {
-            return Err("ffmpeg conversion failed".to_string());
-        }
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Parse: {}", e))?;
 
-        // Call voiceprint.py enroll
-        let output = std::process::Command::new("python3")
-            .args([&script, "enroll", &wav_path, &store])
-            .output()
-            .map_err(|e| format!("voiceprint.py: {}", e))?;
-        let _ = std::fs::remove_file(&wav_path);
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Enrollment failed: {}", stderr));
-        }
-
-        let result: serde_json::Value = serde_json::from_str(&stdout)
-            .map_err(|e| format!("Parse failed: {}", e))?;
-        tracing::info!("Voice enrolled: {} samples", result["sample_count"]);
-        Ok(result)
-    })
-    .await
-    .map_err(|e| format!("Task error: {}", e))?
+    tracing::info!("Voice enrolled: {} samples", result["sample_count"]);
+    Ok(result)
 }
 
-/// Verify if audio matches the host voiceprint.
-/// Returns { is_host: bool, similarity: f64 }
+/// Verify if audio matches the host voiceprint via MLX Server.
 #[tauri::command]
 pub async fn voice_verify(audio_base64: String) -> Result<serde_json::Value, String> {
-    let audio_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&audio_base64)
-        .map_err(|e| format!("Invalid base64: {}", e))?;
+    let wav_path = save_audio_as_wav(&audio_base64).await?;
+    let http = reqwest::Client::new();
 
-    let tmp_base = format!("/tmp/accompany_verify_{}_{}", std::process::id(), ulid::Ulid::new());
-    let script = voiceprint_script();
-    let store = voiceprint_path();
+    let resp = http
+        .post(format!("{}/verify", MLX_SERVER))
+        .json(&serde_json::json!({"audio": wav_path}))
+        .send()
+        .await
+        .map_err(|e| format!("MLX Server verify failed: {}", e))?;
 
-    tokio::task::spawn_blocking(move || {
-        let raw_path = format!("{}.audio", tmp_base);
-        let wav_path = format!("{}.wav", tmp_base);
-        std::fs::write(&raw_path, &audio_bytes)
-            .map_err(|e| format!("Write failed: {}", e))?;
+    let _ = std::fs::remove_file(&wav_path);
 
-        let ffmpeg = std::process::Command::new("ffmpeg")
-            .args(["-y", "-i", &raw_path, "-ar", "16000", "-ac", "1", &wav_path])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("ffmpeg: {}", e))?;
-        let _ = std::fs::remove_file(&raw_path);
-        if !ffmpeg.success() {
-            return Err("ffmpeg conversion failed".to_string());
-        }
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Parse: {}", e))?;
 
-        let output = std::process::Command::new("python3")
-            .args([&script, "verify", &wav_path, &store])
-            .output()
-            .map_err(|e| format!("voiceprint.py: {}", e))?;
-        let _ = std::fs::remove_file(&wav_path);
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Verify failed: {}", stderr));
-        }
-
-        let result: serde_json::Value = serde_json::from_str(&stdout)
-            .map_err(|e| format!("Parse failed: {}", e))?;
-        tracing::info!(
-            "Voice verify: is_host={}, similarity={}",
-            result["is_host"], result["similarity"]
-        );
-        Ok(result)
-    })
-    .await
-    .map_err(|e| format!("Task error: {}", e))?
+    tracing::info!(
+        "Voice verify: is_host={}, sim={}",
+        result["is_host"], result["similarity"]
+    );
+    Ok(result)
 }
 
 /// Check if host voiceprint is enrolled.
 #[tauri::command]
 pub async fn voice_is_enrolled() -> Result<bool, String> {
-    Ok(std::path::Path::new(&voiceprint_path()).exists())
+    let vp_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("accompany/voiceprint.json");
+    Ok(vp_path.exists())
 }
 
 /// Get all stored memories.
