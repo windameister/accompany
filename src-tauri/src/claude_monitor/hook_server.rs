@@ -66,8 +66,8 @@ fn build_alert_message(project: &str, tool: Option<&str>, tool_input: Option<&se
     format!("{}项目的 Claude 想要{}，需要你批准喵！", project, tool_desc)
 }
 
-/// Emit alert event + TTS audio to frontend.
-async fn emit_alert(state: &HookState, session_id: &str, project: &str, tool: &str, message: &str, waiting_count: usize) {
+/// Emit alert event + spawn TTS in background (non-blocking).
+fn emit_alert(state: &HookState, session_id: &str, project: &str, tool: &str, message: &str, waiting_count: usize) {
     let _ = state.app.emit("claude-needs-approval", serde_json::json!({
         "session_id": session_id,
         "project": project,
@@ -77,21 +77,26 @@ async fn emit_alert(state: &HookState, session_id: &str, project: &str, tool: &s
     }));
     let _ = state.app.emit("character-mood", "alert");
 
-    // Generate TTS and emit audio
-    match state.tts.synthesize(message, ALERT_VOICE).await {
-        Ok(bytes) => {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let _ = state.app.emit("tts-audio", serde_json::json!({
-                "seq": 0,
-                "audio": b64,
-                "source": "alert",
-            }));
-            tracing::info!("Alert TTS: {} bytes", bytes.len());
+    // Spawn TTS in background so we don't block the HTTP response
+    let tts = state.tts.clone();
+    let app = state.app.clone();
+    let msg = message.to_string();
+    tokio::spawn(async move {
+        match tts.synthesize(&msg, ALERT_VOICE).await {
+            Ok(bytes) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let _ = app.emit("tts-audio", serde_json::json!({
+                    "seq": 0,
+                    "audio": b64,
+                    "source": "alert",
+                }));
+                tracing::info!("Alert TTS: {} bytes", bytes.len());
+            }
+            Err(e) => {
+                tracing::warn!("Alert TTS failed: {}", e);
+            }
         }
-        Err(e) => {
-            tracing::warn!("Alert TTS failed: {}", e);
-        }
-    }
+    });
 }
 
 async fn handle_session_start(
@@ -129,7 +134,7 @@ async fn handle_permission_request(
         payload.tool_input.as_ref(),
     );
 
-    emit_alert(&state, session_id, project, tool, &alert_msg, sessions.len()).await;
+    emit_alert(&state, session_id, project, tool, &alert_msg, sessions.len());
 
     StatusCode::OK
 }

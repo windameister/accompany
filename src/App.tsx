@@ -94,15 +94,66 @@ function App() {
     };
   }, [showSpeechBubble]);
 
-  // Window drag
+  // Click-through on transparent areas + drag on character
   useEffect(() => {
+    const win = getCurrentWindow();
+    let ignoring = false;
+
+    const handleMouseMove = async (e: MouseEvent) => {
+      // Check if mouse is over a non-transparent pixel on the canvas
+      const canvas = document.querySelector("canvas") as HTMLCanvasElement | null;
+      const isOverUI = (e.target as HTMLElement).closest("[data-no-drag]");
+
+      if (isOverUI) {
+        if (ignoring) {
+          await win.setIgnoreCursorEvents(false);
+          ignoring = false;
+        }
+        return;
+      }
+
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (ctx) {
+          const pixel = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+          const isTransparent = pixel[3] < 10; // alpha < 10 = transparent
+
+          if (isTransparent && !ignoring) {
+            await win.setIgnoreCursorEvents(true);
+            ignoring = true;
+          } else if (!isTransparent && ignoring) {
+            await win.setIgnoreCursorEvents(false);
+            ignoring = false;
+          }
+          return;
+        }
+      }
+
+      // Fallback: if no canvas, don't ignore
+      if (ignoring) {
+        await win.setIgnoreCursorEvents(false);
+        ignoring = false;
+      }
+    };
+
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (target.closest("[data-no-drag]")) return;
-      if (e.button === 0) getCurrentWindow().startDragging();
+      if (e.button === 0 && !ignoring) {
+        win.startDragging();
+      }
     };
+
+    window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mousedown", handleMouseDown);
-    return () => window.removeEventListener("mousedown", handleMouseDown);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mousedown", handleMouseDown);
+      if (ignoring) win.setIgnoreCursorEvents(false);
+    };
   }, []);
 
   const handleCharacterClick = useCallback(() => {
