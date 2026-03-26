@@ -8,7 +8,6 @@ import { useAudioQueue } from "@/hooks/useAudioPlayer";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import { useAlwaysListening } from "@/hooks/useAlwaysListening";
 import { chatSend, onCharacterMood, onChatToken } from "@/lib/tauri";
-import { invoke } from "@tauri-apps/api/core";
 import type { CharacterMood } from "@/lib/constants";
 
 function App() {
@@ -78,21 +77,21 @@ function App() {
     paused: isLoading || isListening || sttProcessing,
   });
 
-  // First launch: cat girl initiates conversation naturally
+  // First launch onboarding — only once ever, tracked by localStorage flag
   useEffect(() => {
+    const ONBOARDING_KEY = "accompany_onboarding_complete";
+    if (localStorage.getItem(ONBOARDING_KEY)) return; // Already done
+
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (cancelled) return;
       try {
-        const enrolled = await invoke<boolean>("voice_is_enrolled");
-        if (enrolled) return; // Already enrolled, skip greeting
-
         setIsLoading(true);
         setMood("happy");
         showSpeechBubble("...", 0);
 
         const res = await chatSend(
-          "[系统指令：这是首次启动，用户还没注册过。请主动做自我介绍，告诉主人你是猫娘桌面助手，然后亲切地问主人叫什么名字。简短自然，2-3句话即可。]"
+          "[系统指令：这是首次启动，用户第一次见到你。请主动做自我介绍，告诉主人你是猫娘桌面助手，然后亲切地问主人叫什么名字。简短自然，2-3句话即可。]"
         );
 
         showSpeechBubble(
@@ -100,6 +99,7 @@ function App() {
           15000,
         );
         setIsLoading(false);
+        localStorage.setItem(ONBOARDING_KEY, "true");
       } catch {
         setIsLoading(false);
       }
