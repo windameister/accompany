@@ -12,9 +12,10 @@ interface UseAlwaysListeningOptions {
 
 // VAD parameters
 const VOLUME_THRESHOLD = 0.015;    // Min volume to consider as speech
-const SPEECH_START_MS = 400;       // Must be loud for this long to start recording
-const SILENCE_END_MS = 1500;       // Silence this long = end of speech
-const MIN_SPEECH_MS = 800;         // Ignore very short sounds
+const SPEECH_START_MS = 300;       // Must be loud for this long to start recording
+const SILENCE_END_MS = 800;        // Confirmed silence → finalize
+const EARLY_SILENCE_MS = 400;      // Short pause → start speculative STT
+const MIN_SPEECH_MS = 600;         // Ignore very short sounds
 const MAX_SPEECH_MS = 30000;       // Max recording length
 
 // Wake words/phrases that bypass intent classification and directly trigger response
@@ -39,6 +40,7 @@ export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListe
   const silenceStartRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
   const isRecordingRef = useRef(false);
+  const speculativeSentRef = useRef(false); // Early STT already dispatched
 
   // Start/stop the microphone stream
   useEffect(() => {
@@ -123,13 +125,23 @@ export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListe
           loudStartRef.current = 0;
         }
       } else {
-        // Currently recording: check for silence or max length
+        // Currently recording: check for silence
         if (vol > VOLUME_THRESHOLD) {
           silenceStartRef.current = 0;
+          speculativeSentRef.current = false; // User resumed speaking, cancel early dispatch
         } else {
           if (silenceStartRef.current === 0) silenceStartRef.current = now;
-          if (now - silenceStartRef.current > SILENCE_END_MS) {
-            // Silence detected, stop recording
+          const silenceDuration = now - silenceStartRef.current;
+
+          // Early dispatch: short pause → start processing speculatively
+          if (silenceDuration > EARLY_SILENCE_MS && !speculativeSentRef.current) {
+            speculativeSentRef.current = true;
+            // Stop recording and process immediately — don't wait for full silence
+            stopRecording();
+          }
+
+          // Full silence confirmation (fallback if early dispatch didn't trigger)
+          if (silenceDuration > SILENCE_END_MS) {
             stopRecording();
           }
         }
@@ -174,6 +186,7 @@ export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListe
     recordingStartRef.current = Date.now();
     silenceStartRef.current = 0;
     loudStartRef.current = 0;
+    speculativeSentRef.current = false;
     setIsActive(true);
     setStatus("recording");
   }
