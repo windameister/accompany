@@ -75,95 +75,74 @@ function App() {
     onSpeech: handleAlwaysOnSpeech,
     enabled: alwaysListenEnabled,
     paused: isLoading || isListening || sttProcessing,
-    silentMode: onboardingStep >= 0, // During onboarding: collect voiceprint only, don't respond
+    // No silentMode during onboarding — user needs to respond via voice too
   });
 
-  // Onboarding: guided conversation → generates soul.md + host.md
-  const onboardingTranscriptRef = useRef<string[]>([]);
+  // Onboarding: simple approach — LLM handles the conversation naturally,
+  // we just count user turns and finalize after enough exchanges.
+  const onboardingTurnRef = useRef(0);
 
+  // Check onboarding status on startup
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (cancelled) return;
       const onboarded = await invoke<boolean>("is_onboarded");
       if (onboarded) {
-        setOnboardingStep(-2); // Already done
+        setOnboardingStep(-2);
       } else {
-        setOnboardingStep(0); // Start onboarding
+        // Start onboarding — send first message to trigger cat girl greeting
+        setOnboardingStep(0);
+        setIsLoading(true);
+        setMood("happy");
+        try {
+          const res = await chatSend(
+            "[系统指令：这是首次见面。请做自我介绍（你是桌面猫娘助手），问主人想给你起什么名字，然后依次了解主人的名字、工作、沟通偏好。每次只问一个问题，自然对话。]"
+          );
+          showSpeechBubble(
+            res.content.length > 80 ? res.content.slice(0, 77) + "..." : res.content,
+            0,
+          );
+        } catch { /* */ }
+        setIsLoading(false);
       }
-    }, 1500);
+    }, 2000);
     return () => { cancelled = true; clearTimeout(timer); };
   }, []);
 
-  // Onboarding conversation steps
-  const onboardingQuestions = [
-    "[系统指令：首次见面。做自我介绍（你是桌面猫娘助手），然后问主人想给你起什么名字。2-3句，亲切自然。]",
-    "[系统指令：主人刚告诉你名字了，开心地回应，然后问主人叫什么名字。1-2句。]",
-    "[系统指令：主人告诉了名字，亲切地叫主人的名字，然后问主人平时做什么工作。1-2句。]",
-    "[系统指令：主人介绍了工作，表示很感兴趣，然后问主人希望你平时怎么跟他说话（可爱/正经/随意），以及有什么特别的需求。1-2句。]",
-    "[系统指令：主人说了偏好。总结一下你了解到的信息，表示以后会好好陪伴主人，语气温馨。2-3句。这是设定环节的最后一段话。]",
-  ];
-
-  // Drive onboarding when step changes
-  useEffect(() => {
-    if (onboardingStep < 0 || onboardingStep >= onboardingQuestions.length) return;
-
-    let cancelled = false;
-    (async () => {
-      // If step 0, just ask the first question
-      // If step > 0, we already have the user's response in the transcript
-      const prompt = onboardingQuestions[onboardingStep];
-
-      setIsLoading(true);
-      setMood("happy");
-      try {
-        const res = await chatSend(prompt);
-        if (cancelled) return;
-
-        onboardingTranscriptRef.current.push(`猫娘: ${res.content}`);
-        showSpeechBubble(
-          res.content.length > 80 ? res.content.slice(0, 77) + "..." : res.content,
-          0, // Don't auto-dismiss during onboarding
-        );
-      } catch {
-        // Error, skip this step
-      }
-      setIsLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [onboardingStep]);
-
-  // Handle user's onboarding response (from always-on listener or text input)
-  const sendMessageRef = useRef(sendMessage);
-  sendMessageRef.current = sendMessage;
-  const wrappedSendMessageRef = useRef<(msg: string) => void>(sendMessage);
-  // Updated below after wrappedSendMessage is defined
-
+  // Wrap sendMessage: during onboarding, count turns and finalize after 4+ exchanges
   const wrappedSendMessage = useCallback(async (msg: string) => {
-    if (onboardingStep >= 0 && onboardingStep < onboardingQuestions.length - 1) {
-      // In onboarding — record response and advance
-      onboardingTranscriptRef.current.push(`主人: ${msg}`);
-      // Send to LLM so it has context
-      await sendMessageRef.current(msg);
-      setOnboardingStep((s) => s + 1);
-    } else if (onboardingStep === onboardingQuestions.length - 1) {
-      // Last step — finalize onboarding
-      onboardingTranscriptRef.current.push(`主人: ${msg}`);
-      await sendMessageRef.current(msg);
-      // Generate soul.md + host.md from transcript
-      try {
-        const transcript = onboardingTranscriptRef.current.join("\n");
-        await invoke("complete_onboarding", { conversation: transcript });
-        console.log("Onboarding complete!");
-      } catch (e) {
-        console.warn("Onboarding finalize failed:", e);
+    // Always send through normal chat (LLM has context from onboarding prompt)
+    await sendMessage(msg);
+
+    // If in onboarding, count turns
+    if (onboardingStep >= 0) {
+      onboardingTurnRef.current += 1;
+      const turns = onboardingTurnRef.current;
+
+      if (turns >= 4) {
+        // Enough conversation — finalize onboarding in background
+        try {
+          // Ask LLM to summarize and say goodbye, then generate soul + host
+          const summary = await chatSend(
+            "[系统指令：设定对话已经进行了几轮。请用1-2句话温馨地结束设定环节，告诉主人以后会好好陪伴。]"
+          );
+          showSpeechBubble(
+            summary.content.length > 80 ? summary.content.slice(0, 77) + "..." : summary.content,
+            8000,
+          );
+
+          // Generate soul.md + host.md from full chat history
+          await invoke("complete_onboarding", { conversation: summary.content });
+          console.log("Onboarding complete!");
+        } catch (e) {
+          console.warn("Onboarding finalize failed:", e);
+        }
+        setOnboardingStep(-2);
       }
-      setOnboardingStep(-2);
-    } else {
-      // Normal mode
-      await sendMessageRef.current(msg);
     }
-  }, [onboardingStep]);
+  }, [onboardingStep, sendMessage, showSpeechBubble]);
+  const wrappedSendMessageRef = useRef(wrappedSendMessage);
   wrappedSendMessageRef.current = wrappedSendMessage;
 
   // Listen for mood changes from backend
