@@ -17,6 +17,17 @@ pub async fn run(app: AppHandle, queue: EventQueue, tts: TtsClient) {
             continue;
         }
 
+        // Don't output anything during onboarding — queue events silently
+        if !crate::soul::is_onboarded() {
+            tracing::debug!("Brain: {} events queued during onboarding, holding", events.len());
+            // Re-queue them for after onboarding
+            for e in events {
+                queue.push(e).await;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            continue;
+        }
+
         tracing::info!("Brain processing {} events", events.len());
 
         // Compose a unified message from the batch

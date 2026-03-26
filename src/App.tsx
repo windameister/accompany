@@ -16,6 +16,7 @@ function App() {
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [alwaysListenEnabled] = useState(true);
+  const [onboardingStep, setOnboardingStep] = useState(-1); // -1=checking, 0+=in progress, -2=done
   const { setMood, showSpeechBubble, clearSpeechBubble } = useCharacterStore();
   const { stop: stopAudio } = useAudioQueue((playing) => {
     if (!playing) {
@@ -73,12 +74,11 @@ function App() {
   const { status: listenStatus } = useAlwaysListening({
     onSpeech: handleAlwaysOnSpeech,
     enabled: alwaysListenEnabled,
-    paused: isLoading || isListening || sttProcessing,
+    paused: isLoading || isListening || sttProcessing || onboardingStep >= 0,
   });
 
   // Onboarding: guided conversation → generates soul.md + host.md
   const onboardingTranscriptRef = useRef<string[]>([]);
-  const [onboardingStep, setOnboardingStep] = useState(-1); // -1 = checking, 0+ = in progress, -2 = done
 
   useEffect(() => {
     let cancelled = false;
