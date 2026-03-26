@@ -198,13 +198,96 @@ pub fn run() {
                 notifications::github::start_github_monitor(app_for_gh, tts_for_gh),
             );
 
+            // Start MLX Server (TTS/STT/Voiceprint) as a managed child process
+            let mlx_child = start_mlx_server();
+            app.manage(mlx_child);
+
             tracing::info!("Accompany started successfully! Hook server on :17832, GitHub monitor active, Cmd+Shift+A to toggle.");
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building Accompany")
-        // Hooks stay installed after exit — they timeout gracefully (5s) when
-        // the server isn't running. This is intentional: user explicitly installs
-        // hooks via tray menu, and they persist until explicitly uninstalled.
-        .run(|_app, _event| {});
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Kill MLX Server on exit
+                if let Some(child) = app.try_state::<MlxServerHandle>() {
+                    child.kill();
+                }
+            }
+        });
+}
+
+/// Handle to the MLX Server child process.
+struct MlxServerHandle {
+    pid: std::sync::Mutex<Option<u32>>,
+}
+
+impl MlxServerHandle {
+    fn kill(&self) {
+        if let Some(pid) = self.pid.lock().unwrap().take() {
+            tracing::info!("Killing MLX Server (PID {})", pid);
+            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+        }
+    }
+}
+
+impl Drop for MlxServerHandle {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Find and start the MLX Server script.
+fn start_mlx_server() -> MlxServerHandle {
+    let script = find_script("scripts/mlx_server.py");
+    if script.is_empty() {
+        tracing::warn!("MLX Server script not found, TTS/STT will use fallbacks");
+        return MlxServerHandle { pid: std::sync::Mutex::new(None) };
+    }
+
+    // Check if already running
+    if let Ok(resp) = std::process::Command::new("curl")
+        .args(["--noproxy", "*", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:17833/health"])
+        .output()
+    {
+        let code = String::from_utf8_lossy(&resp.stdout);
+        if code.trim() == "200" {
+            tracing::info!("MLX Server already running on :17833");
+            return MlxServerHandle { pid: std::sync::Mutex::new(None) };
+        }
+    }
+
+    tracing::info!("Starting MLX Server: {}", script);
+
+    match std::process::Command::new("python3")
+        .arg(&script)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create("/tmp/mlx_server.log").unwrap_or_else(|_| {
+            std::fs::File::create("/dev/null").unwrap()
+        }))
+        .spawn()
+    {
+        Ok(child) => {
+            let pid = child.id();
+            tracing::info!("MLX Server spawned (PID {}), warming up...", pid);
+            MlxServerHandle { pid: std::sync::Mutex::new(Some(pid)) }
+        }
+        Err(e) => {
+            tracing::error!("Failed to start MLX Server: {}", e);
+            MlxServerHandle { pid: std::sync::Mutex::new(None) }
+        }
+    }
+}
+
+fn find_script(relative: &str) -> String {
+    let candidates = [
+        std::env::current_dir().ok().map(|p| p.parent().unwrap_or(&p).join(relative)),
+        std::env::current_dir().ok().map(|p| p.join(relative)),
+    ];
+    for c in candidates.into_iter().flatten() {
+        if c.exists() {
+            return c.to_string_lossy().to_string();
+        }
+    }
+    String::new()
 }

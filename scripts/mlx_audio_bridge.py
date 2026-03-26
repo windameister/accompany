@@ -14,7 +14,7 @@ import subprocess
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16"
+TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
 TTS_VOICE = "Serena"
 TTS_INSTRUCT = "年轻清纯的少女声音，音调偏高，语气温柔自然，像一个16岁左右的邻家女孩，真诚亲切"
 STT_MODEL = "mlx-community/whisper-large-v3-turbo"

@@ -29,6 +29,7 @@ ulid = "1"
 futures = "0.3"
 dirs = "6"
 dotenvy = "0.15"
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

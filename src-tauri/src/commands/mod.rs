@@ -22,7 +22,9 @@ pub struct ChatResponse {
 }
 
 fn is_sentence_end(c: char) -> bool {
-    matches!(c, '。' | '！' | '？' | '.' | '!' | '?' | '\n' | '~' | '～')
+    // Split on all natural pause points for faster TTS (shorter segments = lower latency)
+    matches!(c, '。' | '！' | '？' | '.' | '!' | '?' | '\n' | '~' | '～'
+             | '，' | ',' | '；' | ';' | '、' | '：' | ':')
 }
 
 /// Send a chat message with memory-augmented context + sentence-level TTS pipelining.
