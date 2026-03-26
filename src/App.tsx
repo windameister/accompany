@@ -74,7 +74,8 @@ function App() {
   const { status: listenStatus } = useAlwaysListening({
     onSpeech: handleAlwaysOnSpeech,
     enabled: alwaysListenEnabled,
-    paused: isLoading || isListening || sttProcessing || onboardingStep >= 0,
+    paused: isLoading || isListening || sttProcessing,
+    silentMode: onboardingStep >= 0, // During onboarding: collect voiceprint only, don't respond
   });
 
   // Onboarding: guided conversation → generates soul.md + host.md

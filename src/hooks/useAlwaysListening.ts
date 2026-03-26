@@ -8,6 +8,8 @@ interface UseAlwaysListeningOptions {
   enabled: boolean;
   /** Don't process voice while this is true (e.g. during TTS playback or chat loading) */
   paused: boolean;
+  /** Silent mode: collect voiceprint only, don't STT or respond (e.g. during onboarding) */
+  silentMode?: boolean;
 }
 
 // VAD parameters
@@ -25,7 +27,7 @@ const WAKE_WORDS = [
   "帮我", "请问", "告诉我",
 ];
 
-export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListeningOptions) {
+export function useAlwaysListening({ onSpeech, enabled, paused, silentMode }: UseAlwaysListeningOptions) {
   const [isActive, setIsActive] = useState(false);  // Is currently recording a speech segment
   const [status, setStatus] = useState<"idle" | "listening" | "recording" | "processing">("idle");
 
@@ -207,6 +209,22 @@ export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListe
       });
 
       const base64 = await blobToBase64(blob);
+
+      // Silent mode: only enroll voiceprint, skip STT and response
+      if (silentMode) {
+        try {
+          const enrolled = await invoke<boolean>("voice_is_enrolled");
+          if (!enrolled) {
+            const r = await invoke<{ sample_count: number }>("voice_enroll", { audioBase64: base64 });
+            console.log(`Silent enroll: ${r.sample_count} samples`);
+          }
+        } catch (e) {
+          console.warn("Silent enroll failed:", e);
+        }
+        setStatus("listening");
+        setIsActive(false);
+        return;
+      }
 
       // Run voice verification AND STT in parallel to reduce latency
       const isEnrolled = await invoke<boolean>("voice_is_enrolled");
