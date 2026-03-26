@@ -1,12 +1,9 @@
 use axum::{extract::State, http::StatusCode, middleware, response::IntoResponse, routing::post, Json, Router};
-use base64::Engine;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use super::state::{HookPayload, SessionTracker};
-use crate::agent::tts::TtsClient;
-
-const ALERT_VOICE: &str = "Chinese (Mandarin)_Cute_Spirit";
+use crate::brain::queue::{BrainEvent, EventQueue, EventSource, Priority};
 
 /// Token file path for hook authentication.
 fn token_path() -> std::path::PathBuf {
@@ -45,20 +42,18 @@ pub fn read_hook_token() -> Option<String> {
 struct HookState {
     tracker: SessionTracker,
     app: AppHandle,
-    tts: TtsClient,
-    tts_semaphore: Arc<tokio::sync::Semaphore>,
+    brain: EventQueue,
     token: String,
 }
 
-pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, tts: TtsClient) {
+pub async fn start_hook_server(app: AppHandle, tracker: SessionTracker, brain: EventQueue) {
     let token = get_or_create_token();
     tracing::info!("Hook auth token ready");
 
     let state = HookState {
         tracker,
         app,
-        tts,
-        tts_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        brain,
         token: token.clone(),
     };
 
@@ -130,45 +125,24 @@ fn build_alert_message(project: &str, tool: Option<&str>, tool_input: Option<&se
     format!("{}项目的 Claude 想要{}，需要你批准喵！", project, tool_desc)
 }
 
-/// Emit alert event + spawn TTS in background (non-blocking).
-fn emit_alert(state: &HookState, session_id: &str, project: &str, tool: &str, message: &str, waiting_count: usize) {
-    let _ = state.app.emit("claude-needs-approval", serde_json::json!({
+/// Push an alert event into the brain queue (non-blocking, no direct TTS).
+fn push_alert(state: &HookState, session_id: &str, project: &str, tool: &str, message: &str) {
+    let event = BrainEvent::new(
+        EventSource::Claude,
+        Priority::Urgent,
+        "approval",
+        message,
+    )
+    .with_details(serde_json::json!({
         "session_id": session_id,
         "project": project,
         "tool": tool,
-        "message": message,
-        "waiting_count": waiting_count,
-    }));
-    let _ = state.app.emit("character-mood", "alert");
+    }))
+    .with_dedup(&format!("claude_approval_{}", session_id));
 
-    // Spawn TTS in background with semaphore (max 1 concurrent TTS task)
-    let tts = state.tts.clone();
-    let app = state.app.clone();
-    let sem = state.tts_semaphore.clone();
-    let msg = message.to_string();
+    let brain = state.brain.clone();
     tokio::spawn(async move {
-        // Try to acquire semaphore; if another TTS is running, skip this one
-        let _permit = match sem.try_acquire() {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::debug!("Skipping alert TTS (another already in progress)");
-                return;
-            }
-        };
-        match tts.synthesize(&msg, ALERT_VOICE).await {
-            Ok(bytes) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let _ = app.emit("tts-audio", serde_json::json!({
-                    "seq": 0,
-                    "audio": b64,
-                    "source": "alert",
-                }));
-                tracing::info!("Alert TTS: {} bytes", bytes.len());
-            }
-            Err(e) => {
-                tracing::warn!("Alert TTS failed: {}", e);
-            }
-        }
+        brain.push(event).await;
     });
 }
 
@@ -207,7 +181,7 @@ async fn handle_permission_request(
         payload.tool_input.as_ref(),
     );
 
-    emit_alert(&state, session_id, project, tool, &alert_msg, sessions.len());
+    push_alert(&state, session_id, project, tool, &alert_msg);
 
     StatusCode::OK
 }

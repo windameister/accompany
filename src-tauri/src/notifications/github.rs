@@ -5,11 +5,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
-use crate::agent::tts::TtsClient;
+use crate::brain::queue::{BrainEvent, EventQueue, EventSource, Priority};
 
 const GITHUB_API: &str = "https://api.github.com";
 const POLL_INTERVAL_SECS: u64 = 60;
-const ALERT_VOICE: &str = "Chinese (Mandarin)_Cute_Spirit";
 
 /// Repos to monitor.
 const WATCHED_REPOS: &[&str] = &[
@@ -34,7 +33,7 @@ struct RunsResponse {
 }
 
 /// Start polling GitHub Actions for watched repos.
-pub async fn start_github_monitor(app: AppHandle, tts: TtsClient) {
+pub async fn start_github_monitor(app: AppHandle, brain: EventQueue) {
     // Get GitHub token from gh CLI
     let token = match get_gh_token().await {
         Some(t) => t,
@@ -124,20 +123,20 @@ pub async fn start_github_monitor(app: AppHandle, tts: TtsClient) {
 
                 tracing::info!("GitHub: {} - {} ({})", repo, name, conclusion);
 
-                let _ = app.emit("character-mood", mood);
-                let _ = app.emit("github-action", serde_json::json!({
-                    "repo": repo,
-                    "name": name,
-                    "conclusion": conclusion,
-                    "url": url,
-                    "message": msg,
-                }));
+                let (category, priority) = match conclusion.as_str() {
+                    "failure" => ("deploy_failure", Priority::High),
+                    "success" => ("deploy_success", Priority::Normal),
+                    "cancelled" => ("deploy_cancelled", Priority::Low),
+                    _ => ("deploy_other", Priority::Low),
+                };
 
-                if conclusion == "failure" {
-                    emit_tts(&app, &tts, &msg).await;
-                } else if conclusion == "success" {
-                    let _ = app.emit("github-notify", msg);
-                }
+                let event = BrainEvent::new(EventSource::GitHub, priority, category, &msg)
+                    .with_details(serde_json::json!({
+                        "repo": repo, "name": name, "conclusion": conclusion, "url": url,
+                    }))
+                    .with_dedup(&format!("github_{}_{}", repo, category));
+
+                brain.push(event).await;
             }
 
         }
@@ -186,19 +185,4 @@ async fn get_gh_token() -> Option<String> {
         }
     }
     None
-}
-
-async fn emit_tts(app: &AppHandle, tts: &TtsClient, message: &str) {
-    match tts.synthesize(message, ALERT_VOICE).await {
-        Ok(bytes) => {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let _ = app.emit("tts-audio", serde_json::json!({
-                "seq": 0,
-                "audio": b64,
-                "source": "github",
-            }));
-        }
-        Err(e) => tracing::warn!("GitHub TTS failed: {}", e),
-    }
 }

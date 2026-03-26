@@ -114,36 +114,28 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, [setMood]);
 
-  // Listen for Claude approval alerts
+  // Listen for brain-composed messages (unified output from all sources)
   useEffect(() => {
     const unlisten = listen<{
-      session_id: string;
-      project?: string;
-      tool?: string;
       message: string;
-      waiting_count: number;
-    }>("claude-needs-approval", async (event) => {
-      const { message } = event.payload;
-      showSpeechBubble(message, 0);
-      setMood("alert");
-      const win = getCurrentWindow();
-      await win.show();
-      await win.setFocus();
-      setTimeout(() => {
-        clearSpeechBubble();
-        setMood("idle");
-      }, 15000);
+      event_count: number;
+      has_urgent: boolean;
+    }>("brain-message", async (event) => {
+      const { message, has_urgent } = event.payload;
+      showSpeechBubble(message, has_urgent ? 0 : 8000);
+
+      if (has_urgent) {
+        const win = getCurrentWindow();
+        await win.show();
+        await win.setFocus();
+        setTimeout(() => {
+          clearSpeechBubble();
+          setMood("idle");
+        }, 15000);
+      }
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [showSpeechBubble, clearSpeechBubble, setMood]);
-
-  // Listen for GitHub notifications
-  useEffect(() => {
-    const unlisten = listen<string>("github-notify", (event) => {
-      showSpeechBubble(event.payload, 6000);
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, [showSpeechBubble]);
 
   // Listen for streaming tokens
   useEffect(() => {

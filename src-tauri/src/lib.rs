@@ -5,6 +5,7 @@ use tauri::{
 };
 
 mod agent;
+mod brain;
 mod claude_monitor;
 mod commands;
 mod hooks_manager;
@@ -109,8 +110,6 @@ pub fn run() {
 
     let agent = agent::client::AgentClient::new(minimax_key.clone());
     let tts = agent::tts::TtsClient::new(minimax_key.clone());
-    let tts_for_hooks = agent::tts::TtsClient::new(minimax_key.clone());
-
     // Initialize memory database
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -180,22 +179,30 @@ pub fn run() {
                 tracing::info!("macOS: configured window for first-mouse events");
             }
 
-            // Start Claude Code hook server (runs in background on port 17832)
+            // Create the brain (event queue + decision engine)
+            let brain_queue = brain::queue::EventQueue::new();
+
+            // Start brain engine
+            let brain_app = app.handle().clone();
+            let brain_tts = agent::tts::TtsClient::new(
+                std::env::var("MINIMAX_API_KEY").unwrap_or_default(),
+            );
+            let brain_q = brain_queue.clone();
+            tauri::async_runtime::spawn(brain::engine::run(brain_app, brain_q, brain_tts));
+
+            // Start Claude Code hook server (pushes events to brain)
             let tracker = claude_monitor::state::SessionTracker::new();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(claude_monitor::hook_server::start_hook_server(
                 app_handle,
                 tracker,
-                tts_for_hooks,
+                brain_queue.clone(),
             ));
 
-            // Start GitHub Actions monitor
+            // Start GitHub Actions monitor (pushes events to brain)
             let app_for_gh = app.handle().clone();
-            let tts_for_gh = agent::tts::TtsClient::new(
-                std::env::var("MINIMAX_API_KEY").unwrap_or_default(),
-            );
             tauri::async_runtime::spawn(
-                notifications::github::start_github_monitor(app_for_gh, tts_for_gh),
+                notifications::github::start_github_monitor(app_for_gh, brain_queue.clone()),
             );
 
             // Start MLX Server (TTS/STT/Voiceprint) as a managed child process
