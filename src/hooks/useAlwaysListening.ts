@@ -195,39 +195,30 @@ export function useAlwaysListening({ onSpeech, enabled, paused }: UseAlwaysListe
 
       const base64 = await blobToBase64(blob);
 
-      // Step 1: Voice verification / passive enrollment
+      // Run voice verification AND STT in parallel to reduce latency
       const isEnrolled = await invoke<boolean>("voice_is_enrolled");
-      if (isEnrolled) {
-        // Verify it's the host
-        const result = await invoke<{ is_host: boolean; similarity: number }>(
-          "voice_verify",
-          { audioBase64: base64 },
-        );
-        console.log(`Voice verify: host=${result.is_host}, sim=${result.similarity}`);
-        if (!result.is_host) {
-          setStatus("listening");
-          setIsActive(false);
-          return;
-        }
-      } else {
-        // Not enrolled yet — silently enroll this sample
-        try {
-          const result = await invoke<{ sample_count: number }>(
-            "voice_enroll",
-            { audioBase64: base64 },
-          );
-          console.log(`Voice enrolled passively: ${result.sample_count} samples`);
-          if (result.sample_count >= 3) {
-            // Enrollment complete — cat girl will mention it naturally
-            console.log("Voiceprint enrollment complete!");
-          }
-        } catch (e) {
-          console.warn("Passive enrollment failed:", e);
-        }
-      }
 
-      // Step 2: STT
-      const text = await invoke<string>("stt_recognize", { audioBase64: base64 });
+      const verifyPromise = isEnrolled
+        ? invoke<{ is_host: boolean; similarity: number }>("voice_verify", { audioBase64: base64 })
+        : invoke<{ sample_count: number }>("voice_enroll", { audioBase64: base64 })
+            .then((r) => {
+              console.log(`Voice enrolled: ${r.sample_count} samples`);
+              return { is_host: true, similarity: 1.0 }; // Not enrolled = accept all
+            })
+            .catch(() => ({ is_host: true, similarity: 1.0 }));
+
+      const sttPromise = invoke<string>("stt_recognize", { audioBase64: base64 });
+
+      // Wait for both in parallel
+      const [verifyResult, text] = await Promise.all([verifyPromise, sttPromise]);
+
+      console.log(`Verify: host=${verifyResult.is_host}, sim=${verifyResult.similarity}`);
+
+      if (isEnrolled && !verifyResult.is_host) {
+        setStatus("listening");
+        setIsActive(false);
+        return;
+      }
       if (!text) {
         setStatus("listening");
         setIsActive(false);
