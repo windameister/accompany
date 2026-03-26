@@ -429,6 +429,129 @@ pub async fn voice_is_enrolled() -> Result<bool, String> {
     Ok(vp_path.exists())
 }
 
+/// Check if onboarding is complete.
+#[tauri::command]
+pub fn is_onboarded() -> bool {
+    crate::soul::is_onboarded()
+}
+
+/// After onboarding conversation, generate soul.md + host.md from the transcript.
+#[tauri::command]
+pub async fn complete_onboarding(
+    conversation: String,
+    api_key: State<'_, ApiKeyState>,
+) -> Result<(), String> {
+    let http = reqwest::Client::new();
+    let key = api_key.0.clone();
+
+    // Generate soul.md
+    let soul_prompt = format!(
+        r#"Based on this onboarding conversation between a cat-girl desktop assistant and her new owner, generate a SOUL.md personality file for the cat-girl.
+
+Conversation:
+{}
+
+Generate a Markdown file with these sections:
+# Soul — [猫娘的名字]
+
+## 核心身份
+(Who she is, her name, her role — 2-3 sentences)
+
+## 性格特质
+(3-5 bullet points about her personality)
+
+## 说话风格
+(How she talks — tone, language habits, emoji usage)
+
+## 边界
+(What she won't do, behavioral limits)
+
+## 与主人的关系
+(How she relates to the owner based on what she learned)
+
+Only output the Markdown content, nothing else. Write in Chinese."#,
+        conversation
+    );
+
+    let soul_resp = http.post("https://api.minimaxi.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", key))
+        .json(&serde_json::json!({
+            "model": "MiniMax-M2.7",
+            "messages": [{"role": "user", "content": soul_prompt}],
+            "max_tokens": 1024,
+            "temperature": 0.7,
+        }))
+        .send().await.map_err(|e| format!("Soul gen failed: {}", e))?;
+
+    let soul_json: serde_json::Value = soul_resp.json().await
+        .map_err(|e| format!("Parse: {}", e))?;
+    let soul_content = soul_json["choices"][0]["message"]["content"]
+        .as_str().unwrap_or("").to_string();
+
+    // Strip <think> blocks
+    let soul_clean = strip_think_blocks(&soul_content);
+    crate::soul::write_soul(&soul_clean)?;
+
+    // Generate host.md
+    let host_prompt = format!(
+        r#"From this conversation, extract information about the owner (主人). Generate a HOST.md file.
+
+Conversation:
+{}
+
+Generate Markdown with:
+# 主人
+
+## 基本信息
+(Name, what they do, etc.)
+
+## 偏好
+(Communication preferences, interests learned)
+
+## 备注
+(Any other relevant info)
+
+Only output Markdown. Write in Chinese. If info is unknown, skip that field."#,
+        conversation
+    );
+
+    let host_resp = http.post("https://api.minimaxi.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", key))
+        .json(&serde_json::json!({
+            "model": "MiniMax-M2.7",
+            "messages": [{"role": "user", "content": host_prompt}],
+            "max_tokens": 512,
+            "temperature": 0.5,
+        }))
+        .send().await.map_err(|e| format!("Host gen failed: {}", e))?;
+
+    let host_json: serde_json::Value = host_resp.json().await
+        .map_err(|e| format!("Parse: {}", e))?;
+    let host_content = host_json["choices"][0]["message"]["content"]
+        .as_str().unwrap_or("").to_string();
+
+    let host_clean = strip_think_blocks(&host_content);
+    crate::soul::write_host(&host_clean)?;
+
+    tracing::info!("Onboarding complete! Soul + Host generated.");
+    Ok(())
+}
+
+fn strip_think_blocks(s: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = s;
+    while let Some(start) = remaining.find("<think>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</think>") {
+            remaining = &remaining[start + end + 8..];
+        } else {
+            remaining = "";
+        }
+    }
+    result.push_str(remaining);
+    result.trim().to_string()
+}
+
 /// Get all stored memories.
 #[tauri::command]
 pub async fn memory_list(db: State<'_, MemoryDb>) -> Result<Vec<Memory>, String> {

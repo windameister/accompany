@@ -11,6 +11,7 @@ mod commands;
 mod hooks_manager;
 mod memory;
 mod notifications;
+mod soul;
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::PredefinedMenuItem;
@@ -155,6 +156,8 @@ pub fn run() {
             commands::voice_enroll,
             commands::voice_verify,
             commands::voice_is_enrolled,
+            commands::is_onboarded,
+            commands::complete_onboarding,
             commands::memory_list,
             commands::memory_delete,
         ])

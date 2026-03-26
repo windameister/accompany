@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import CharacterCanvas from "@/components/character/CharacterCanvas";
@@ -7,6 +7,7 @@ import { useCharacterStore } from "@/stores/characterStore";
 import { useAudioQueue } from "@/hooks/useAudioPlayer";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import { useAlwaysListening } from "@/hooks/useAlwaysListening";
+import { invoke } from "@tauri-apps/api/core";
 import { chatSend, onCharacterMood, onChatToken } from "@/lib/tauri";
 import type { CharacterMood } from "@/lib/constants";
 
@@ -58,18 +59,16 @@ function App() {
     startListening,
     stopListening,
     error: sttError,
-  } = useSpeechRecognition({ onResult: sendMessage });
+  } = useSpeechRecognition({ onResult: (text: string) => wrappedSendMessageRef.current(text) });
 
   // Always-on voice listening with intent classification
   const handleAlwaysOnSpeech = useCallback((text: string, intent: "direct" | "self_talk" | "wake_word") => {
     if (intent === "wake_word" || intent === "direct") {
-      // User is talking to the cat girl
-      sendMessage(text);
+      wrappedSendMessageRef.current(text);
     } else if (intent === "self_talk") {
-      // User is talking to themselves — cat girl proactively responds with care
-      sendMessage(`[用户在自言自语: "${text}"] 请作为猫娘助手，温柔地回应或关心一下`);
+      wrappedSendMessageRef.current(`[用户在自言自语: "${text}"] 请作为猫娘助手，温柔地回应或关心一下`);
     }
-  }, [sendMessage]);
+  }, []);
 
   const { status: listenStatus } = useAlwaysListening({
     onSpeech: handleAlwaysOnSpeech,
@@ -77,36 +76,94 @@ function App() {
     paused: isLoading || isListening || sttProcessing,
   });
 
-  // First launch onboarding — only once ever, tracked by localStorage flag
-  useEffect(() => {
-    const ONBOARDING_KEY = "accompany_onboarding_complete";
-    if (localStorage.getItem(ONBOARDING_KEY)) return; // Already done
+  // Onboarding: guided conversation → generates soul.md + host.md
+  const onboardingTranscriptRef = useRef<string[]>([]);
+  const [onboardingStep, setOnboardingStep] = useState(-1); // -1 = checking, 0+ = in progress, -2 = done
 
+  useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (cancelled) return;
-      try {
-        setIsLoading(true);
-        setMood("happy");
-        showSpeechBubble("...", 0);
-
-        const res = await chatSend(
-          "[系统指令：这是首次启动，用户第一次见到你。请主动做自我介绍，告诉主人你是猫娘桌面助手，然后亲切地问主人叫什么名字。简短自然，2-3句话即可。]"
-        );
-
-        showSpeechBubble(
-          res.content.length > 80 ? res.content.slice(0, 77) + "..." : res.content,
-          15000,
-        );
-        setIsLoading(false);
-        localStorage.setItem(ONBOARDING_KEY, "true");
-      } catch {
-        setIsLoading(false);
+      const onboarded = await invoke<boolean>("is_onboarded");
+      if (onboarded) {
+        setOnboardingStep(-2); // Already done
+      } else {
+        setOnboardingStep(0); // Start onboarding
       }
-    }, 2000);
-
+    }, 1500);
     return () => { cancelled = true; clearTimeout(timer); };
   }, []);
+
+  // Onboarding conversation steps
+  const onboardingQuestions = [
+    "[系统指令：首次见面。做自我介绍（你是桌面猫娘助手），然后问主人想给你起什么名字。2-3句，亲切自然。]",
+    "[系统指令：主人刚告诉你名字了，开心地回应，然后问主人叫什么名字。1-2句。]",
+    "[系统指令：主人告诉了名字，亲切地叫主人的名字，然后问主人平时做什么工作。1-2句。]",
+    "[系统指令：主人介绍了工作，表示很感兴趣，然后问主人希望你平时怎么跟他说话（可爱/正经/随意），以及有什么特别的需求。1-2句。]",
+    "[系统指令：主人说了偏好。总结一下你了解到的信息，表示以后会好好陪伴主人，语气温馨。2-3句。这是设定环节的最后一段话。]",
+  ];
+
+  // Drive onboarding when step changes
+  useEffect(() => {
+    if (onboardingStep < 0 || onboardingStep >= onboardingQuestions.length) return;
+
+    let cancelled = false;
+    (async () => {
+      // If step 0, just ask the first question
+      // If step > 0, we already have the user's response in the transcript
+      const prompt = onboardingQuestions[onboardingStep];
+
+      setIsLoading(true);
+      setMood("happy");
+      try {
+        const res = await chatSend(prompt);
+        if (cancelled) return;
+
+        onboardingTranscriptRef.current.push(`猫娘: ${res.content}`);
+        showSpeechBubble(
+          res.content.length > 80 ? res.content.slice(0, 77) + "..." : res.content,
+          0, // Don't auto-dismiss during onboarding
+        );
+      } catch {
+        // Error, skip this step
+      }
+      setIsLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [onboardingStep]);
+
+  // Handle user's onboarding response (from always-on listener or text input)
+  const sendMessageRef = useRef(sendMessage);
+  sendMessageRef.current = sendMessage;
+  const wrappedSendMessageRef = useRef<(msg: string) => void>(sendMessage);
+  // Updated below after wrappedSendMessage is defined
+
+  const wrappedSendMessage = useCallback(async (msg: string) => {
+    if (onboardingStep >= 0 && onboardingStep < onboardingQuestions.length - 1) {
+      // In onboarding — record response and advance
+      onboardingTranscriptRef.current.push(`主人: ${msg}`);
+      // Send to LLM so it has context
+      await sendMessageRef.current(msg);
+      setOnboardingStep((s) => s + 1);
+    } else if (onboardingStep === onboardingQuestions.length - 1) {
+      // Last step — finalize onboarding
+      onboardingTranscriptRef.current.push(`主人: ${msg}`);
+      await sendMessageRef.current(msg);
+      // Generate soul.md + host.md from transcript
+      try {
+        const transcript = onboardingTranscriptRef.current.join("\n");
+        await invoke("complete_onboarding", { conversation: transcript });
+        console.log("Onboarding complete!");
+      } catch (e) {
+        console.warn("Onboarding finalize failed:", e);
+      }
+      setOnboardingStep(-2);
+    } else {
+      // Normal mode
+      await sendMessageRef.current(msg);
+    }
+  }, [onboardingStep]);
+  wrappedSendMessageRef.current = wrappedSendMessage;
 
   // Listen for mood changes from backend
   useEffect(() => {
@@ -203,8 +260,9 @@ function App() {
   }, [isLoading]);
 
   const handleSend = useCallback(() => {
-    sendMessage(inputText);
-  }, [inputText, sendMessage]);
+    wrappedSendMessage(inputText);
+    setInputText("");
+  }, [inputText, wrappedSendMessage]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

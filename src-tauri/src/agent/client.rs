@@ -91,13 +91,8 @@ impl AgentClient {
         let messages = {
             let history = self.history.lock().await;
 
-            let base_prompt = system_prompt();
             let memory_ctx = self.memory_context.lock().unwrap().take();
-            let full_prompt = if let Some(ctx) = memory_ctx {
-                format!("{}\n\n{}", base_prompt, ctx)
-            } else {
-                base_prompt
-            };
+            let full_prompt = crate::soul::build_system_prompt(memory_ctx.as_deref());
 
             let mut msgs = vec![ChatMessage {
                 role: "system".into(),
