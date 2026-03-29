@@ -18,9 +18,7 @@ function App() {
   const [alwaysListenEnabled] = useState(true);
   const [onboardingStep, setOnboardingStep] = useState(-1); // -1=checking, 0+=in progress, -2=done
   const { setMood, showSpeechBubble, clearSpeechBubble } = useCharacterStore();
-  const [audioPlaying, setAudioPlaying] = useState(false);
   const { stop: stopAudio } = useAudioQueue((playing) => {
-    setAudioPlaying(playing);
     if (!playing) {
       setTimeout(() => {
         setMood("idle");
@@ -76,7 +74,8 @@ function App() {
   const { status: listenStatus } = useAlwaysListening({
     onSpeech: handleAlwaysOnSpeech,
     enabled: alwaysListenEnabled,
-    paused: isLoading || isListening || sttProcessing || audioPlaying,
+    paused: isLoading || isListening || sttProcessing,
+    // Note: audioPlaying no longer pauses listener — browser AEC handles echo cancellation
     // No silentMode during onboarding — user needs to respond via voice too
   });
 

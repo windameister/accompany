@@ -4,22 +4,35 @@ import { listen } from "@tauri-apps/api/event";
 interface TtsChunk {
   seq: number;
   audio: string; // base64
-  source: string; // "chat" | "alert" | "github"
+  source: string; // "chat" | "alert" | "github" | "brain"
 }
 
 /**
- * Audio player with priority-based queue.
- * - "alert" and "github" sources interrupt current chat audio
- * - Same-source audio plays in order
- * - Listens for "tts-audio" events from backend
+ * Audio player using AudioContext for AEC (Acoustic Echo Cancellation) support.
+ *
+ * By playing audio through AudioContext → MediaStreamDestination, the browser's
+ * built-in AEC can recognize it as "local output" and cancel it from the
+ * microphone input, preventing the cat girl from hearing herself.
  */
 export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
   const queueRef = useRef<TtsChunk[]>([]);
   const isPlayingRef = useRef(false);
   const currentSourceRef = useRef<string>("");
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const currentSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
 
-  const playNext = useCallback(() => {
+  // Lazy-init AudioContext (needs user gesture on some browsers)
+  const getAudioContext = useCallback(() => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext();
+    }
+    if (audioCtxRef.current.state === "suspended") {
+      audioCtxRef.current.resume();
+    }
+    return audioCtxRef.current;
+  }, []);
+
+  const playNext = useCallback(async () => {
     if (queueRef.current.length === 0) {
       isPlayingRef.current = false;
       currentSourceRef.current = "";
@@ -30,38 +43,44 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     const chunk = queueRef.current.shift()!;
     currentSourceRef.current = chunk.source;
 
-    // Auto-detect format: WAV starts with "UklGR" in base64 (RIFF header)
-    const mime = chunk.audio.startsWith("UklGR") ? "audio/wav" : "audio/mp3";
-    const blob = base64ToBlob(chunk.audio, mime);
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audioRef.current = audio;
+    try {
+      const ctx = getAudioContext();
+      const blob = base64ToBlob(
+        chunk.audio,
+        chunk.audio.startsWith("UklGR") ? "audio/wav" : "audio/mp3",
+      );
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
-      audioRef.current = null;
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+
+      // Route through AudioContext destination (enables browser AEC)
+      source.connect(ctx.destination);
+      currentSourceNodeRef.current = source;
+
+      source.onended = () => {
+        currentSourceNodeRef.current = null;
+        playNext();
+      };
+
+      source.start();
+    } catch (e) {
+      console.warn("Audio playback error:", e);
+      currentSourceNodeRef.current = null;
       playNext();
-    };
-
-    audio.onerror = () => {
-      URL.revokeObjectURL(url);
-      audioRef.current = null;
-      playNext();
-    };
-
-    audio.play().catch(() => playNext());
-  }, [onPlayStateChange]);
+    }
+  }, [onPlayStateChange, getAudioContext]);
 
   const enqueue = useCallback(
     (chunk: TtsChunk) => {
-      // Alert/github sources interrupt ongoing chat audio
+      // Alert/brain sources interrupt ongoing chat audio
       if (chunk.source !== "chat" && currentSourceRef.current === "chat") {
         queueRef.current = queueRef.current.filter((c) => c.source !== "chat");
-        if (audioRef.current) {
-          audioRef.current.pause();
-          audioRef.current = null;
+        if (currentSourceNodeRef.current) {
+          try { currentSourceNodeRef.current.stop(); } catch { /* */ }
+          currentSourceNodeRef.current = null;
         }
-        // Reset playing state so the new chunk triggers playback
         isPlayingRef.current = false;
       }
 
@@ -78,9 +97,9 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
 
   const stop = useCallback(() => {
     queueRef.current = [];
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+    if (currentSourceNodeRef.current) {
+      try { currentSourceNodeRef.current.stop(); } catch { /* */ }
+      currentSourceNodeRef.current = null;
     }
     isPlayingRef.current = false;
     currentSourceRef.current = "";
@@ -95,11 +114,8 @@ export function useAudioQueue(onPlayStateChange?: (playing: boolean) => void) {
     const unlisten = listen<TtsChunk>("tts-audio", (event) => {
       enqueueRef.current(event.payload);
     });
-
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []); // empty deps — only register once
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   return { stop, isPlayingRef };
 }
